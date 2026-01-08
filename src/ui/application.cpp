@@ -1381,7 +1381,6 @@ void Application::RenderMemoryViewer() {
         ImGui::Separator();
 
         if (!memory_data_.empty()) {
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
             if (font_mono_) ImGui::PushFont(font_mono_);
 
             // Fixed row height for virtualization
@@ -1398,11 +1397,15 @@ void Application::RenderMemoryViewer() {
                     size_t offset = row * bytes_per_row_;
                     uint64_t addr = memory_address_ + offset;
 
-                    // Build entire line in a buffer for faster rendering
+                    // Build entire line in a single buffer for cleaner rendering
+                    // Format: ADDRESS  HH HH HH HH HH HH HH HH  HH HH HH HH HH HH HH HH  |ASCII...........|
                     char line_buf[256];
                     int pos = 0;
 
-                    // Hex bytes
+                    // Address
+                    pos += snprintf(line_buf + pos, sizeof(line_buf) - pos, "%016llX  ", (unsigned long long)addr);
+
+                    // Hex bytes with grouping
                     for (int col = 0; col < bytes_per_row_; col++) {
                         size_t idx = offset + col;
                         if (idx < memory_data_.size()) {
@@ -1410,42 +1413,40 @@ void Application::RenderMemoryViewer() {
                         } else {
                             pos += snprintf(line_buf + pos, sizeof(line_buf) - pos, "   ");
                         }
+                        // Add extra space at midpoint for visual grouping
                         if (col == 7) {
                             line_buf[pos++] = ' ';
                         }
                     }
 
-                    // ASCII section
-                    char ascii_buf[32] = {0};
+                    // ASCII section with separator
                     if (show_ascii_) {
-                        ascii_buf[0] = '|';
+                        line_buf[pos++] = ' ';
+                        line_buf[pos++] = '|';
                         for (int col = 0; col < bytes_per_row_; col++) {
                             size_t idx = offset + col;
                             if (idx < memory_data_.size()) {
                                 char c = static_cast<char>(memory_data_[idx]);
-                                ascii_buf[1 + col] = (c >= 32 && c < 127) ? c : '.';
+                                line_buf[pos++] = (c >= 32 && c < 127) ? c : '.';
                             } else {
-                                ascii_buf[1 + col] = ' ';
+                                line_buf[pos++] = ' ';
                             }
                         }
-                        ascii_buf[1 + bytes_per_row_] = '|';
-                        ascii_buf[2 + bytes_per_row_] = '\0';
+                        line_buf[pos++] = '|';
                     }
+                    line_buf[pos] = '\0';
 
-                    // Render entire row
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%016llX  ", (unsigned long long)addr);
-                    ImGui::SameLine();
-                    ImGui::Text("%s", line_buf);
-                    if (show_ascii_) {
-                        ImGui::SameLine();
-                        ImGui::Text("%s", ascii_buf);
-                    }
+                    // Color the address portion differently
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                    ImGui::TextUnformatted(line_buf, line_buf + 18);  // Address (16 chars + 2 spaces)
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextUnformatted(line_buf + 18);  // Rest of the line
                 }
             }
 
             ImGui::EndChild();
             if (font_mono_) ImGui::PopFont();
-            ImGui::PopStyleVar();
         } else {
             ImGui::TextDisabled("Enter an address and click Read");
         }

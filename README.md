@@ -16,6 +16,39 @@
 - **MCP Server** - REST API for Claude/LLM integration
 - **CS2 Schema Dumper** - Counter-Strike 2 class/offset extraction
 
+## Screenshots
+
+<p align="center">
+  <img src="resources/images/processes.png" alt="Process List" width="320">
+  <img src="resources/images/modules.png" alt="Module Browser" width="320">
+</p>
+<p align="center">
+  <em>Process list with live refresh &nbsp;•&nbsp; Module browser with base addresses</em>
+</p>
+
+<p align="center">
+  <img src="resources/images/memory.png" alt="Memory View" width="420">
+  <img src="resources/images/disasm.png" alt="Disassembly" width="420">
+</p>
+<p align="center">
+  <em>Hex editor with ASCII view &nbsp;•&nbsp; x86-64 disassembly</em>
+</p>
+
+<p align="center">
+  <img src="resources/images/mcp.png" alt="MCP Settings" width="420">
+  <img src="resources/images/mcpinstaller.png" alt="MCPinstaller" width="280">
+</p>
+<p align="center">
+  <em>MCP server configuration &nbsp;•&nbsp; MCPinstaller auto-detects clients</em>
+</p>
+
+<p align="center">
+  <img src="resources/images/status.png" alt="Status Bar">
+</p>
+<p align="center">
+  <em>Status bar with detected FPGA device</em>
+</p>
+
 ## Requirements
 
 - Windows 10/11 (64-bit)
