@@ -79,6 +79,11 @@ public:
     [[nodiscard]] std::filesystem::path GetConfigDirectory() const { return app_data_dir_ / "config"; }
 
     /**
+     * Get the SLEIGH processor specifications directory path (for Ghidra decompiler)
+     */
+    [[nodiscard]] std::filesystem::path GetSleighDirectory() const;
+
+    /**
      * Get list of all extracted files
      */
     [[nodiscard]] const std::vector<std::filesystem::path>& GetExtractedFiles() const {
@@ -116,6 +121,15 @@ private:
      * @return true on success
      */
     bool ExtractDLL(std::string_view name, const unsigned char* data, size_t size);
+
+    /**
+     * Extract a file to a specific path
+     * @param target_path Full path where to write the file
+     * @param data Pointer to embedded data
+     * @param size Size of embedded data
+     * @return true on success
+     */
+    bool ExtractFile(const std::filesystem::path& target_path, const unsigned char* data, size_t size);
 
     /**
      * Set up platform-specific DLL search path

@@ -287,6 +287,37 @@ const MCP_TOOLS = [
     }
   },
   {
+    name: 'decompile',
+    description: 'Decompile a function at the specified address using the Ghidra decompiler. Returns C-like pseudocode. Best used on function entry points. For CS2: use inject_schema=true after cs2_init to enable automatic field naming.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Address of the function to decompile (hex). Should be the function entry point.'
+        },
+        function_name: {
+          type: 'string',
+          description: 'Optional name for the function (default: auto-generated)'
+        },
+        inject_schema: {
+          type: 'boolean',
+          description: 'Inject CS2 schema types into the decompiler for automatic field naming. Requires cs2_init to be called first. Default: false',
+          default: false
+        },
+        this_type: {
+          type: 'string',
+          description: 'Class name for the "this" pointer type (e.g., "CCSPlayerController"). When specified, sets the first parameter type to enable field name resolution. Requires inject_schema=true.'
+        }
+      },
+      required: ['pid', 'address']
+    }
+  },
+  {
     name: 'get_processes',
     description: 'List all running processes visible to DMA. Returns array of process info with PID, name, and base address.',
     inputSchema: {
@@ -809,45 +840,30 @@ const MCP_TOOLS = [
     }
   },
   // ============================================================================
-  // CS2 Schema Tools
+  // CS2 Consolidated Init (One-Shot)
   // ============================================================================
   {
-    name: 'cs2_schema_init',
-    description: 'Initialize CS2 schema dumper by finding SchemaSystem interface. Must be called before other cs2_schema_* tools. Returns available scopes (client.dll, server.dll, etc.).',
+    name: 'cs2_init',
+    description: 'One-shot initialization for CS2 analysis. Combines schema_init, schema_dump, rtti_scan, and entity_init in a single call. Returns complete system state including schema info, RTTI class count, entity system addresses, and local player data. Use this instead of calling individual cs2_schema_* and cs2_entity_* tools separately.',
     inputSchema: {
       type: 'object',
       properties: {
         pid: {
           type: 'integer',
           description: 'Process ID of Counter-Strike 2'
+        },
+        force_refresh: {
+          type: 'boolean',
+          description: 'Force re-dump of schema and RTTI even if cached. Default: false',
+          default: false
         }
       },
       required: ['pid']
     }
   },
-  {
-    name: 'cs2_schema_dump',
-    description: 'Dump schema classes from a specific scope or all scopes. Results are cached for fast subsequent queries. Use force_refresh to re-dump.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        scope: {
-          type: 'string',
-          description: 'Scope name to dump (e.g., "client.dll", "server.dll"). Omit to dump all scopes.'
-        },
-        force_refresh: {
-          type: 'boolean',
-          description: 'Force re-dump even if cache exists',
-          default: false
-        },
-        deduplicate: {
-          type: 'boolean',
-          description: 'When dumping all scopes (no scope specified), deduplicate classes by name across all scopes (like Andromeda). Default: true',
-          default: true
-        }
-      }
-    }
-  },
+  // ============================================================================
+  // CS2 Schema Query Tools (use cs2_init for initialization)
+  // ============================================================================
   {
     name: 'cs2_schema_get_offset',
     description: 'Get the offset for a specific class field. Searches live dumper first, then cache.',
@@ -944,22 +960,8 @@ const MCP_TOOLS = [
     }
   },
   // ============================================================================
-  // CS2 Entity Tools (RTTI + Schema Bridge)
+  // CS2 Entity Tools (RTTI + Schema Bridge) - use cs2_init for initialization
   // ============================================================================
-  {
-    name: 'cs2_entity_init',
-    description: 'Initialize CS2 entity system by pattern scanning for CGameEntitySystem and LocalPlayerController. Must be called before using cs2_get_local_player or cs2_get_entity. Caches results for subsequent calls.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        pid: {
-          type: 'integer',
-          description: 'Process ID of Counter-Strike 2'
-        }
-      },
-      required: ['pid']
-    }
-  },
   {
     name: 'cs2_identify',
     description: 'Identify the class of an object at a given address using RTTI. Reads the vtable pointer and parses RTTI to get the class name, then matches it to the schema. Returns RTTI class name, schema class name, and field count.',
@@ -1042,7 +1044,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'cs2_get_local_player',
-    description: 'Get the local player controller. Requires cs2_entity_init to be called first. Returns the controller address, identified class, and key fields (pawn handle, health, armor, alive status).',
+    description: 'Get the local player controller. Requires cs2_init to be called first. Returns the controller address, identified class, and key fields (pawn handle, health, armor, alive status).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1090,6 +1092,7 @@ const TOOL_ENDPOINT_MAP = {
   'scan_pattern': { method: 'POST', path: '/tools/scan_pattern' },
   'scan_strings': { method: 'POST', path: '/tools/scan_strings' },
   'disassemble': { method: 'POST', path: '/tools/disassemble' },
+  'decompile': { method: 'POST', path: '/tools/decompile' },
   'get_processes': { method: 'GET', path: '/tools/processes' },
   'get_modules': { method: 'POST', path: '/tools/modules' },
   'resolve_pointer': { method: 'POST', path: '/tools/resolve_pointer' },
@@ -1120,17 +1123,16 @@ const TOOL_ENDPOINT_MAP = {
   'bookmark_add': { method: 'POST', path: '/tools/bookmarks/add' },
   'bookmark_remove': { method: 'POST', path: '/tools/bookmarks/remove' },
   'bookmark_update': { method: 'POST', path: '/tools/bookmarks/update' },
-  // CS2 Schema tools
-  'cs2_schema_init': { method: 'POST', path: '/tools/cs2_schema_init' },
-  'cs2_schema_dump': { method: 'POST', path: '/tools/cs2_schema_dump' },
+  // CS2 Consolidated init (one-shot)
+  'cs2_init': { method: 'POST', path: '/tools/cs2_init' },
+  // CS2 Schema query tools
   'cs2_schema_get_offset': { method: 'POST', path: '/tools/cs2_schema_get_offset' },
   'cs2_schema_find_class': { method: 'POST', path: '/tools/cs2_schema_find_class' },
   'cs2_schema_cache_list': { method: 'POST', path: '/tools/cs2_schema_cache_list' },
   'cs2_schema_cache_query': { method: 'POST', path: '/tools/cs2_schema_cache_query' },
   'cs2_schema_cache_get': { method: 'POST', path: '/tools/cs2_schema_cache_get' },
   'cs2_schema_cache_clear': { method: 'POST', path: '/tools/cs2_schema_cache_clear' },
-  // CS2 Entity tools (RTTI + Schema bridge)
-  'cs2_entity_init': { method: 'POST', path: '/tools/cs2_entity_init' },
+  // CS2 Entity query tools
   'cs2_identify': { method: 'POST', path: '/tools/cs2_identify' },
   'cs2_read_field': { method: 'POST', path: '/tools/cs2_read_field' },
   'cs2_inspect': { method: 'POST', path: '/tools/cs2_inspect' },

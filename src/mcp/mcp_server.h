@@ -7,6 +7,7 @@
 #include <functional>
 #include <vector>
 #include <map>
+#include "../utils/cache_manager.h"
 
 namespace orpheus {
 
@@ -93,14 +94,19 @@ public:
     static std::string GenerateApiKey();
 
     /**
-     * Save config to file
+     * Get the default config file path (in AppData/config)
      */
-    static bool SaveConfig(const MCPConfig& config, const std::string& filepath = "mcp_config.json");
+    static std::string GetDefaultConfigPath();
 
     /**
-     * Load config from file
+     * Save config to file (defaults to AppData/config/mcp_config.json)
      */
-    static bool LoadConfig(MCPConfig& config, const std::string& filepath = "mcp_config.json");
+    static bool SaveConfig(const MCPConfig& config, const std::string& filepath = "");
+
+    /**
+     * Load config from file (defaults to AppData/config/mcp_config.json)
+     */
+    static bool LoadConfig(MCPConfig& config, const std::string& filepath = "");
 
 private:
     // Server thread
@@ -119,6 +125,7 @@ private:
     std::string HandleScanStrings(const std::string& body);
     std::string HandleDumpModule(const std::string& body);
     std::string HandleDisassemble(const std::string& body);
+    std::string HandleDecompile(const std::string& body);
     std::string HandleGetProcesses(const std::string& body);
     std::string HandleGetModules(const std::string& body);
     std::string HandleFindXrefs(const std::string& body);
@@ -153,9 +160,7 @@ private:
     std::string HandleBookmarkRemove(const std::string& body);
     std::string HandleBookmarkUpdate(const std::string& body);
 
-    // CS2 Schema endpoints
-    std::string HandleCS2SchemaInit(const std::string& body);
-    std::string HandleCS2SchemaDump(const std::string& body);
+    // CS2 Schema query endpoints (use cs2_init for initialization)
     std::string HandleCS2SchemaGetOffset(const std::string& body);
     std::string HandleCS2SchemaFindClass(const std::string& body);
 
@@ -165,8 +170,10 @@ private:
     std::string HandleCS2SchemaCacheGet(const std::string& body);
     std::string HandleCS2SchemaCacheClear(const std::string& body);
 
-    // CS2 Entity tools (RTTI + Schema bridge)
-    std::string HandleCS2EntityInit(const std::string& body);
+    // CS2 Consolidated init (one-shot)
+    std::string HandleCS2Init(const std::string& body);
+
+    // CS2 Entity tools (RTTI + Schema bridge) - use cs2_init for initialization
     std::string HandleCS2Identify(const std::string& body);
     std::string HandleCS2ReadField(const std::string& body);
     std::string HandleCS2Inspect(const std::string& body);
@@ -204,24 +211,16 @@ private:
     std::unique_ptr<emulation::Emulator> emulator_;
     uint32_t emulator_pid_ = 0;  // PID the emulator is attached to
 
-    // RTTI cache helpers
-    std::string GetCacheDirectory();
-    std::string GetCacheFilePath(const std::string& module_name, uint32_t module_size);
-    bool SaveRTTICache(const std::string& module_name, uint32_t module_size, const std::string& json_data);
-    std::string LoadRTTICache(const std::string& module_name, uint32_t module_size);
-    bool CacheExists(const std::string& module_name, uint32_t module_size);
+    // Cache managers (unified cache system)
+    utils::CacheManager rtti_cache_{"rtti", "RTTI"};
+    utils::CacheManager cs2_schema_cache_{"cs2_schema", "CS2 schema"};
 
     // CS2 Schema instance (lazy-initialized)
     void* cs2_schema_ = nullptr;  // dumper::CS2SchemaDumper* (opaque)
     uint32_t cs2_schema_pid_ = 0;
 
-    // CS2 Schema cache helpers
-    std::string GetCS2SchemaCacheDirectory();
-    std::string GetCS2SchemaCacheFilePath(const std::string& scope_name, uint32_t module_size);
-    bool SaveCS2SchemaCache(const std::string& scope_name, uint32_t module_size, const std::string& json_data);
-    std::string LoadCS2SchemaCache(const std::string& scope_name, uint32_t module_size);
-    bool CS2SchemaCacheExists(const std::string& scope_name, uint32_t module_size);
-    uint32_t GetModuleSizeForScope(const std::string& scope_name);  // Get size of DLL corresponding to scope
+    // CS2 scope size lookup helper
+    uint32_t GetModuleSizeForScope(const std::string& scope_name);
 
     // CS2 Entity system cache (discovered via pattern scanning)
     struct CS2EntityCache {

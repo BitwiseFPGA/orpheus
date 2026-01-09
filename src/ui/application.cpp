@@ -1,5 +1,6 @@
 #include "application.h"
 #include "core/dma_interface.h"
+#include "core/runtime_manager.h"
 #include "utils/logger.h"
 #include "utils/bookmarks.h"
 #include "analysis/disassembler.h"
@@ -11,6 +12,7 @@
 #include "mcp/mcp_server.h"
 #include "emulation/emulator.h"
 #include "dumper/cs2_schema.h"
+#include "decompiler/decompiler.hh"
 #include "embedded_resources.h"
 
 #include <imgui.h>
@@ -124,7 +126,9 @@ bool Application::InitializeImGui() {
     // Note: ViewportsEnable disabled - causes orphan windows on some setups
     // io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
-    io.IniFilename = "orpheus_layout.ini";
+    // Store ini path in member variable (ImGui keeps the pointer)
+    ini_path_ = (RuntimeManager::Instance().GetConfigDirectory() / "orpheus_layout.ini").string();
+    io.IniFilename = ini_path_.c_str();
 
     // Load fonts using member font_size_
     RebuildFonts();
@@ -622,6 +626,9 @@ void Application::RegisterKeybinds() {
         {"Disassembly", "Toggle disassembly", GLFW_KEY_4, GLFW_MOD_CONTROL, [this]() {
             panels_.disassembly = !panels_.disassembly;
         }},
+        {"Decompiler", "Toggle decompiler", GLFW_KEY_D, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, [this]() {
+            panels_.decompiler = !panels_.decompiler;
+        }},
         {"Pattern Scanner", "Toggle pattern scanner", GLFW_KEY_5, GLFW_MOD_CONTROL, [this]() {
             panels_.pattern_scanner = !panels_.pattern_scanner;
         }},
@@ -817,6 +824,7 @@ void Application::RenderDockspace() {
     if (panels_.module_list) RenderModuleList();
     if (panels_.memory_viewer) RenderMemoryViewer();
     if (panels_.disassembly) RenderDisassembly();
+    if (panels_.decompiler) RenderDecompiler();
     if (panels_.pattern_scanner) RenderPatternScanner();
     if (panels_.string_scanner) RenderStringScanner();
     if (panels_.memory_watcher) RenderMemoryWatcher();
@@ -869,6 +877,7 @@ void Application::RenderMenuBar() {
             ImGui::MenuItem("Modules", "Ctrl+2", &panels_.module_list);
             ImGui::MenuItem("Memory", "Ctrl+3", &panels_.memory_viewer);
             ImGui::MenuItem("Disassembly", "Ctrl+4", &panels_.disassembly);
+            ImGui::MenuItem("Decompiler", "Ctrl+Shift+D", &panels_.decompiler);
             ImGui::Separator();
             ImGui::MenuItem("Pattern Scanner", "Ctrl+5", &panels_.pattern_scanner);
             ImGui::MenuItem("String Scanner", "Ctrl+6", &panels_.string_scanner);
@@ -1528,6 +1537,108 @@ void Application::RenderDisassembly() {
     } else {
         ImGui::TextDisabled("Select a process to disassemble");
     }
+
+    ImGui::End();
+}
+
+void Application::RenderDecompiler() {
+    ImGui::Begin("Decompiler", &panels_.decompiler);
+
+#ifdef ORPHEUS_HAS_GHIDRA_DECOMPILER
+    // Initialize decompiler on first use
+    if (!decompiler_initialized_ && !decompiler_) {
+        decompiler_ = std::make_unique<Decompiler>();
+        DecompilerConfig config;
+
+        // Get SLEIGH specs from RuntimeManager (extracted to AppData)
+        auto sleigh_dir = RuntimeManager::Instance().GetSleighDirectory();
+        if (!sleigh_dir.empty() && std::filesystem::exists(sleigh_dir)) {
+            config.sleigh_spec_path = sleigh_dir.string();
+        } else {
+            LOG_WARN("SLEIGH directory not found, decompiler may not work");
+            config.sleigh_spec_path = "";
+        }
+        LOG_INFO("SLEIGH specs path: {}", config.sleigh_spec_path);
+
+        config.processor = "x86";
+        config.address_size = 64;
+        config.little_endian = true;
+        config.compiler_spec = "windows";
+
+        if (decompiler_->Initialize(config)) {
+            decompiler_initialized_ = true;
+            LOG_INFO("Ghidra decompiler initialized");
+        } else {
+            LOG_ERROR("Failed to initialize decompiler: {}", decompiler_->GetLastError());
+        }
+    }
+
+    if (selected_pid_ != 0 && dma_ && dma_->IsConnected()) {
+        // Address input
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::InputText("Address", decompile_address_input_, sizeof(decompile_address_input_),
+            ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue)) {
+            decompile_address_ = strtoull(decompile_address_input_, nullptr, 16);
+        }
+
+        ImGui::SameLine();
+        bool can_decompile = decompiler_initialized_ && decompile_address_ != 0;
+        if (!can_decompile) ImGui::BeginDisabled();
+        if (ImGui::Button("Decompile")) {
+            if (decompiler_) {
+                // Set up DMA callback for memory reading
+                decompiler_->SetMemoryCallback([this](uint64_t addr, size_t size, uint8_t* buffer) -> bool {
+                    auto data = dma_->ReadMemory(selected_pid_, addr, static_cast<uint32_t>(size));
+                    if (data.size() >= size) {
+                        memcpy(buffer, data.data(), size);
+                        return true;
+                    }
+                    return false;
+                });
+
+                // Decompile the function
+                auto result = decompiler_->DecompileFunction(decompile_address_);
+                if (result.success) {
+                    decompiled_code_ = result.c_code;
+                    LOG_INFO("Decompiled function at 0x{:X}", decompile_address_);
+                } else {
+                    decompiled_code_ = "// Decompilation failed: " + result.error;
+                    LOG_WARN("Decompilation failed: {}", result.error);
+                }
+            }
+        }
+        if (!can_decompile) ImGui::EndDisabled();
+
+        if (!decompiler_initialized_) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "(Decompiler not initialized)");
+        }
+
+        ImGui::Separator();
+
+        // Output area with syntax highlighting (basic C style)
+        if (font_mono_) ImGui::PushFont(font_mono_);
+
+        ImGui::BeginChild("##DecompilerOutput", ImVec2(0, 0), true,
+            ImGuiWindowFlags_HorizontalScrollbar);
+
+        if (!decompiled_code_.empty()) {
+            // Simple syntax coloring - highlight keywords
+            ImGui::TextUnformatted(decompiled_code_.c_str());
+        } else {
+            ImGui::TextDisabled("Enter an address and click Decompile");
+        }
+
+        ImGui::EndChild();
+        if (font_mono_) ImGui::PopFont();
+    } else {
+        ImGui::TextDisabled("Select a process to decompile");
+    }
+#else
+    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f),
+        "Decompiler not available");
+    ImGui::TextDisabled("Build with -DORPHEUS_BUILD_DECOMPILER=ON to enable");
+#endif
 
     ImGui::End();
 }
@@ -3200,7 +3311,7 @@ void Application::RenderCS2Schema() {
             ImGui::Text("schemasystem.dll: 0x%llX", schemasystem_base);
 
             if (ImGui::Button("Initialize Schema Dumper", ImVec2(200, 0))) {
-                cs2_schema_ = std::make_unique<dumper::CS2SchemaDumper>(dma_.get(), selected_pid_);
+                cs2_schema_ = std::make_unique<orpheus::dumper::CS2SchemaDumper>(dma_.get(), selected_pid_);
                 if (cs2_schema_->Initialize(schemasystem_base)) {
                     cs2_schema_pid_ = selected_pid_;
                     cs2_schema_initialized_ = true;
@@ -3344,7 +3455,7 @@ void Application::RenderCS2Schema() {
         // Field list (right pane)
         ImGui::BeginChild("FieldList", ImVec2(0, avail_height), true);
 
-        const dumper::SchemaClass* selected_cls = nullptr;
+        const orpheus::dumper::SchemaClass* selected_cls = nullptr;
         for (const auto& cls : cs2_cached_classes_) {
             if (cls.name == cs2_selected_class_) {
                 selected_cls = &cls;

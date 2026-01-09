@@ -123,6 +123,39 @@ struct VMM_MAP_MODULE {
     VMM_MAP_MODULEENTRY pMap[1];
 };
 
+// VAD (Virtual Address Descriptor) entry struct - memory regions
+struct VMM_MAP_VADENTRY {
+    ULONG64 vaStart;
+    ULONG64 vaEnd;
+    ULONG64 vaVad;
+    // DWORD 0: bitfield for VadType(3), Protection(5), fImage(1), fFile(1), fPageFile(1), fPrivateMemory(1), etc.
+    DWORD dw0;
+    // DWORD 1: CommitCharge(31), MemCommit(1)
+    DWORD dw1;
+    DWORD u2;
+    DWORD cbPrototypePte;
+    ULONG64 vaPrototypePte;
+    ULONG64 vaSubsection;
+    LPSTR uszText;  // Description text (e.g., module name for image mappings)
+    DWORD _FutureUse1;
+    DWORD _Reserved1;
+    ULONG64 vaFileObject;
+    DWORD cVadExPages;
+    DWORD cVadExPagesBase;
+    ULONG64 _Reserved2;
+};
+
+// VAD map struct
+struct VMM_MAP_VAD {
+    DWORD dwVersion;
+    DWORD _Reserved1[4];
+    DWORD cPage;
+    ULONG64 pbMultiText;
+    DWORD cbMultiText;
+    DWORD cMap;
+    VMM_MAP_VADENTRY pMap[1];
+};
+
 // Constants
 static constexpr ULONG64 PROCESS_INFO_MAGIC = 0xc0ffee663df9301eULL;
 static constexpr WORD PROCESS_INFO_VERSION = 7;
@@ -141,6 +174,7 @@ using FN_ProcessGetInformation = BOOL(*)(void*, DWORD, VMM_PROCESS_INFORMATION*,
 using FN_ProcessGetInformationAll = BOOL(*)(void*, VMM_PROCESS_INFORMATION**, PDWORD);
 using FN_ProcessGetInformationString = LPSTR(*)(void*, DWORD, DWORD);
 using FN_MapGetModuleU = BOOL(*)(void*, DWORD, VMM_MAP_MODULE**, DWORD);
+using FN_MapGetVadU = BOOL(*)(void*, DWORD, BOOL, VMM_MAP_VAD**);
 using FN_MemRead = BOOL(*)(void*, DWORD, ULONG64, PBYTE, DWORD);
 using FN_MemReadEx = BOOL(*)(void*, DWORD, ULONG64, PBYTE, DWORD, PDWORD, ULONG64);
 using FN_MemWrite = BOOL(*)(void*, DWORD, ULONG64, PBYTE, DWORD);
@@ -191,6 +225,7 @@ static FN_ProcessGetInformation fn_ProcessGetInfo = nullptr;
 static FN_ProcessGetInformationAll fn_ProcessGetInfoAll = nullptr;
 static FN_ProcessGetInformationString fn_ProcessGetInfoString = nullptr;
 static FN_MapGetModuleU fn_MapGetModuleU = nullptr;
+static FN_MapGetVadU fn_MapGetVadU = nullptr;
 static FN_MemRead fn_MemRead = nullptr;
 static FN_MemReadEx fn_MemReadEx = nullptr;
 static FN_MemWrite fn_MemWrite = nullptr;
@@ -226,6 +261,7 @@ static bool LoadVMMFunctions() {
     fn_ProcessGetInfoAll = LoadFunction<FN_ProcessGetInformationAll>("VMMDLL_ProcessGetInformationAll");
     fn_ProcessGetInfoString = LoadFunction<FN_ProcessGetInformationString>("VMMDLL_ProcessGetInformationString");
     fn_MapGetModuleU = LoadFunction<FN_MapGetModuleU>("VMMDLL_Map_GetModuleU");
+    fn_MapGetVadU = LoadFunction<FN_MapGetVadU>("VMMDLL_Map_GetVadU");
     fn_MemRead = LoadFunction<FN_MemRead>("VMMDLL_MemRead");
     fn_MemReadEx = LoadFunction<FN_MemReadEx>("VMMDLL_MemReadEx");
     fn_MemWrite = LoadFunction<FN_MemWrite>("VMMDLL_MemWrite");
@@ -454,8 +490,58 @@ std::optional<ModuleInfo> DMAInterface::GetModuleByName(uint32_t pid, const std:
     return std::nullopt;
 }
 
-std::vector<MemoryRegion> DMAInterface::GetMemoryRegions(uint32_t /*pid*/) {
-    return {}; // TODO: Implement
+std::vector<MemoryRegion> DMAInterface::GetMemoryRegions(uint32_t pid) {
+    std::vector<MemoryRegion> result;
+    if (!IsConnected() || fn_MapGetVadU == nullptr) return result;
+
+    VMM_MAP_VAD* pVadMap = nullptr;
+    if (!fn_MapGetVadU(vmm_handle_, pid, TRUE, &pVadMap) || pVadMap == nullptr) {
+        return result;
+    }
+
+    result.reserve(pVadMap->cMap);
+    for (DWORD i = 0; i < pVadMap->cMap; i++) {
+        const auto& entry = pVadMap->pMap[i];
+        MemoryRegion region;
+        region.base_address = entry.vaStart;
+        region.size = entry.vaEnd - entry.vaStart + 1;
+        
+        // Extract protection from dw0 bitfield (bits 3-7)
+        DWORD protection = (entry.dw0 >> 3) & 0x1F;
+        // Convert to string representation
+        static const char* prot_strings[] = {
+            "---", "--R", "-W-", "-WR", "E--", "E-R", "EW-", "EWR",
+            "---", "--R", "-WC", "-WCR", "E--", "E-R", "EWC", "EWCR",
+            "---", "--R", "-W-", "-WR", "E--", "E-R", "EW-", "EWR",
+            "---", "--R", "-WC", "-WCR", "E--", "E-R", "EWC", "EWCR"
+        };
+        region.protection = prot_strings[protection & 0x1F];
+        
+        // Determine type from flags in dw0
+        bool fImage = (entry.dw0 >> 8) & 1;
+        bool fFile = (entry.dw0 >> 9) & 1;
+        bool fPrivate = (entry.dw0 >> 11) & 1;
+        bool fStack = (entry.dw0 >> 13) & 1;
+        bool fHeap = (entry.dw0 >> 23) & 1;
+        
+        if (fImage) region.type = "Image";
+        else if (fStack) region.type = "Stack";
+        else if (fHeap) region.type = "Heap";
+        else if (fFile) region.type = "Mapped";
+        else if (fPrivate) region.type = "Private";
+        else region.type = "Unknown";
+        
+        // Info text from VMM
+        region.info = entry.uszText ? entry.uszText : "";
+        
+        result.push_back(std::move(region));
+    }
+
+    if (fn_MemFree && pVadMap) {
+        fn_MemFree(pVadMap);
+    }
+
+    return result;
 }
 
 std::vector<uint8_t> DMAInterface::ReadMemory(uint32_t pid, uint64_t address, size_t size) {

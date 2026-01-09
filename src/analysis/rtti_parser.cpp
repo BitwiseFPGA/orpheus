@@ -1,4 +1,5 @@
 #include "rtti_parser.h"
+#include "pe_dumper.h"
 #include <algorithm>
 #include <cstring>
 #include <regex>
@@ -463,85 +464,17 @@ std::optional<VTableInfo> RTTIParser::ParseFullVTable(uint64_t vtable_address, s
 std::vector<PESection> RTTIParser::GetPESections(uint64_t module_base) {
     std::vector<PESection> sections;
 
-    // Read DOS header to get PE header offset
-    auto dos_header = read_memory_(module_base, 64);
-    if (dos_header.size() < 64) {
-        return sections;
-    }
+    // Use PEDumper for PE parsing (eliminates duplicated PE header logic)
+    PEDumper dumper(read_memory_);
+    auto dumper_sections = dumper.GetSections(module_base);
 
-    // Check DOS signature "MZ"
-    if (dos_header[0] != 'M' || dos_header[1] != 'Z') {
-        return sections;
-    }
-
-    // Get e_lfanew (PE header offset) at offset 0x3C
-    uint32_t pe_offset;
-    std::memcpy(&pe_offset, dos_header.data() + 0x3C, 4);
-
-    if (pe_offset == 0 || pe_offset > 0x1000) {
-        return sections;  // Sanity check
-    }
-
-    // Read PE header
-    auto pe_header = read_memory_(module_base + pe_offset, 0x200);
-    if (pe_header.size() < 0x108) {  // Need at least through optional header
-        return sections;
-    }
-
-    // Check PE signature "PE\0\0"
-    if (pe_header[0] != 'P' || pe_header[1] != 'E' ||
-        pe_header[2] != 0 || pe_header[3] != 0) {
-        return sections;
-    }
-
-    // COFF file header starts at offset 4
-    // NumberOfSections at offset 4+2 = 6
-    uint16_t num_sections;
-    std::memcpy(&num_sections, pe_header.data() + 6, 2);
-
-    // SizeOfOptionalHeader at offset 4+16 = 20
-    uint16_t optional_header_size;
-    std::memcpy(&optional_header_size, pe_header.data() + 20, 2);
-
-    if (num_sections == 0 || num_sections > 96) {
-        return sections;  // Sanity check
-    }
-
-    // Section headers start after optional header
-    // PE sig (4) + COFF header (20) + optional header
-    size_t section_header_offset = 4 + 20 + optional_header_size;
-
-    // Each section header is 40 bytes
-    size_t section_data_size = num_sections * 40;
-
-    // Read all section headers
-    auto section_data = read_memory_(module_base + pe_offset + section_header_offset, section_data_size);
-    if (section_data.size() < section_data_size) {
-        return sections;
-    }
-
-    // Parse each section header
-    for (uint16_t i = 0; i < num_sections; i++) {
-        size_t offset = i * 40;
-
+    // Convert SectionInfo to PESection
+    for (const auto& si : dumper_sections) {
         PESection section;
-
-        // Name is first 8 bytes (null-padded)
-        char name[9] = {0};
-        std::memcpy(name, section_data.data() + offset, 8);
-        section.name = name;
-
-        // VirtualSize at offset 8
-        std::memcpy(&section.virtual_size, section_data.data() + offset + 8, 4);
-
-        // VirtualAddress (RVA) at offset 12
-        uint32_t rva;
-        std::memcpy(&rva, section_data.data() + offset + 12, 4);
-        section.virtual_address = module_base + rva;
-
-        // Characteristics at offset 36
-        std::memcpy(&section.characteristics, section_data.data() + offset + 36, 4);
-
+        section.name = si.name;
+        section.virtual_address = module_base + si.virtual_address;  // Convert RVA to VA
+        section.virtual_size = si.virtual_size;
+        section.characteristics = si.characteristics;
         sections.push_back(section);
     }
 

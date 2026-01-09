@@ -13,7 +13,7 @@
 using json = nlohmann::json;
 using orpheus::DMAInterface;
 
-namespace dumper {
+namespace orpheus::dumper {
 
 CS2SchemaDumper::CS2SchemaDumper(orpheus::DMAInterface* dma, uint32_t pid)
     : dma_(dma), pid_(pid) {
@@ -749,4 +749,4 @@ bool CS2SchemaDumper::ExportToHeader(const std::string& filepath) const {
     }
 }
 
-} // namespace dumper
+} // namespace orpheus::dumper

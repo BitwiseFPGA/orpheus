@@ -43,6 +43,7 @@ endfunction()
 function(embed_all_dlls)
     set(DLL_DIR "${CMAKE_SOURCE_DIR}/resources/dlls")
     set(FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts")
+    set(SLEIGH_DIR "${CMAKE_SOURCE_DIR}/resources/sleigh/x86")
     set(OUTPUT_DIR "${CMAKE_BINARY_DIR}/generated")
 
     # Create output directory
@@ -64,6 +65,15 @@ function(embed_all_dlls)
         "${FONT_DIR}/JetBrainsMono-Regular.ttf"
         "${FONT_DIR}/JetBrainsMono-Bold.ttf"
         "${FONT_DIR}/JetBrainsMono-Medium.ttf"
+    )
+
+    # SLEIGH processor specification files for Ghidra decompiler
+    set(EMBEDDED_SLEIGH
+        "${SLEIGH_DIR}/x86.ldefs"
+        "${SLEIGH_DIR}/x86.pspec"
+        "${SLEIGH_DIR}/x86-64.sla"
+        "${SLEIGH_DIR}/x86-64.pspec"
+        "${SLEIGH_DIR}/x86-64-win.cspec"
     )
 
     # Process each DLL
@@ -90,6 +100,23 @@ function(embed_all_dlls)
             list(APPEND EMBEDDED_HEADERS "${output_file}")
         else()
             message(WARNING "Font not found: ${font_file}")
+        endif()
+    endforeach()
+
+    # Process SLEIGH spec files
+    set(HAS_SLEIGH FALSE)
+    foreach(sleigh_file ${EMBEDDED_SLEIGH})
+        if(EXISTS "${sleigh_file}")
+            get_filename_component(sleigh_name "${sleigh_file}" NAME)
+            string(TOLOWER "${sleigh_name}" sleigh_name_lower)
+            string(REPLACE "." "_" sleigh_name_lower "${sleigh_name_lower}")
+            string(REPLACE "-" "_" sleigh_name_lower "${sleigh_name_lower}")
+            set(output_file "${OUTPUT_DIR}/embedded_sleigh_${sleigh_name_lower}.h")
+            embed_resource("${sleigh_file}" "${output_file}")
+            list(APPEND EMBEDDED_HEADERS "${output_file}")
+            set(HAS_SLEIGH TRUE)
+        else()
+            message(WARNING "SLEIGH file not found: ${sleigh_file}")
         endif()
     endforeach()
 
@@ -162,6 +189,30 @@ function(embed_all_dlls)
         "}};\n\n"
         "// Legacy alias for backward compatibility\n"
         "inline constexpr auto& resources = dll_resources;\n\n"
+    )
+
+    # SLEIGH resources
+    if(HAS_SLEIGH)
+        file(APPEND "${MASTER_HEADER}"
+            "// SLEIGH processor specification files for Ghidra decompiler\n"
+            "inline constexpr bool has_sleigh = true;\n"
+            "inline constexpr std::array<ResourceInfo, 5> sleigh_resources = {{\n"
+            "    {\"x86.ldefs\", x86_ldefs, x86_ldefs_size},\n"
+            "    {\"x86.pspec\", x86_pspec, x86_pspec_size},\n"
+            "    {\"x86-64.sla\", x86_64_sla, x86_64_sla_size},\n"
+            "    {\"x86-64.pspec\", x86_64_pspec, x86_64_pspec_size},\n"
+            "    {\"x86-64-win.cspec\", x86_64_win_cspec, x86_64_win_cspec_size},\n"
+            "}};\n\n"
+        )
+    else()
+        file(APPEND "${MASTER_HEADER}"
+            "// SLEIGH resources not available\n"
+            "inline constexpr bool has_sleigh = false;\n"
+            "inline constexpr std::array<ResourceInfo, 0> sleigh_resources = {{}};\n\n"
+        )
+    endif()
+
+    file(APPEND "${MASTER_HEADER}"
         "// Icon resource (optional)\n"
     )
 

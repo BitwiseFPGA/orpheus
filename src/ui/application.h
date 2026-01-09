@@ -39,10 +39,12 @@ namespace emulation {
     class Emulator;
 }
 
+class Decompiler;
+
 } // namespace orpheus
 
 // Forward declarations for game-specific dumpers
-namespace dumper {
+namespace orpheus::dumper {
     class CS2SchemaDumper;
     struct SchemaClass;
 }
@@ -91,6 +93,7 @@ struct PanelState {
     bool emulator = false;
     bool cs2_schema = false;  // CS2-specific schema dumper
     bool cs2_entity_inspector = false;  // CS2 entity inspector (RTTI + Schema)
+    bool decompiler = false;  // Ghidra decompiler view
 };
 
 /**
@@ -154,6 +157,7 @@ private:
     void RenderEmulatorPanel();
     void RenderCS2Schema();
     void RenderCS2EntityInspector();
+    void RenderDecompiler();
 
     // Dialogs
     void RenderCommandPalette();
@@ -178,6 +182,9 @@ private:
     GLFWwindow* window_ = nullptr;
     bool running_ = false;
     bool first_frame_ = true;
+
+    // ImGui settings path (stored as member since ImGui keeps pointer)
+    std::string ini_path_;
 
     // Fullscreen state
     bool is_fullscreen_ = false;
@@ -216,6 +223,13 @@ private:
     // Emulator
     std::unique_ptr<emulation::Emulator> emulator_;
     uint32_t emulator_pid_ = 0;
+
+    // Decompiler
+    std::unique_ptr<Decompiler> decompiler_;
+    std::string decompiled_code_;
+    uint64_t decompile_address_ = 0;
+    char decompile_address_input_[32] = {};
+    bool decompiler_initialized_ = false;
 
     // Panel visibility
     PanelState panels_;
@@ -338,7 +352,7 @@ private:
     bool show_add_bookmark_popup_ = false;
 
     // CS2 Schema Dumper state
-    std::unique_ptr<::dumper::CS2SchemaDumper> cs2_schema_;
+    std::unique_ptr<orpheus::dumper::CS2SchemaDumper> cs2_schema_;
     uint32_t cs2_schema_pid_ = 0;
     bool cs2_schema_initialized_ = false;
     bool cs2_schema_dumping_ = false;
@@ -348,7 +362,7 @@ private:
     char cs2_field_filter_[256] = {};
     int cs2_selected_scope_ = 0;
     std::string cs2_selected_class_;
-    std::vector<::dumper::SchemaClass> cs2_cached_classes_;
+    std::vector<orpheus::dumper::SchemaClass> cs2_cached_classes_;
 
     // CS2 Entity Inspector state
     bool cs2_entity_initialized_ = false;

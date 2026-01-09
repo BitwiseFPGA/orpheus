@@ -8,7 +8,7 @@
 
 namespace orpheus { class DMAInterface; }
 
-namespace dumper {
+namespace orpheus::dumper {
 
 /**
  * Schema field information
@@ -193,4 +193,4 @@ private:
     static constexpr size_t FIELD_ENTRY_SIZE = 0x20;  // Field name, type, offset, padding
 };
 
-} // namespace dumper
+} // namespace orpheus::dumper

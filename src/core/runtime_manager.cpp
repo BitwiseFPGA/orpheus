@@ -54,11 +54,13 @@ bool RuntimeManager::Initialize() {
         auto dll_dir = app_data_dir_ / "dlls";
         auto cache_dir = app_data_dir_ / "cache";
         auto config_dir = app_data_dir_ / "config";
+        auto sleigh_dir = app_data_dir_ / "sleigh" / "x86";
 
         std::filesystem::create_directories(app_data_dir_);
         std::filesystem::create_directories(dll_dir);
         std::filesystem::create_directories(cache_dir);
         std::filesystem::create_directories(config_dir);
+        std::filesystem::create_directories(sleigh_dir);
 
     } catch (const std::filesystem::filesystem_error& e) {
         ReportError("Filesystem error creating AppData directory: " + std::string(e.what()));
@@ -94,6 +96,29 @@ bool RuntimeManager::Initialize() {
         return false;
     }
 
+    // Extract embedded SLEIGH spec files (only if missing)
+    if constexpr (embedded::has_sleigh) {
+        auto sleigh_dir = app_data_dir_ / "sleigh" / "x86";
+        for (const auto& resource : embedded::sleigh_resources) {
+            auto target_path = sleigh_dir / resource.name;
+
+            bool needs_extract = true;
+            if (std::filesystem::exists(target_path)) {
+                auto existing_size = std::filesystem::file_size(target_path);
+                if (existing_size == resource.size) {
+                    needs_extract = false;
+                }
+            }
+
+            if (needs_extract) {
+                if (!ExtractFile(target_path, resource.data, resource.size)) {
+                    ReportError("Failed to extract SLEIGH file: " + std::string(resource.name));
+                    // Non-fatal - decompiler just won't work
+                }
+            }
+        }
+    }
+
     // Set up DLL search path
     if (!SetupDLLSearchPath()) {
         ReportError("Failed to set up DLL search path");
@@ -108,11 +133,16 @@ bool RuntimeManager::ExtractDLL(std::string_view name,
                                 const unsigned char* data,
                                 size_t size) {
     auto dll_path = app_data_dir_ / "dlls" / name;
+    return ExtractFile(dll_path, data, size);
+}
 
+bool RuntimeManager::ExtractFile(const std::filesystem::path& target_path,
+                                 const unsigned char* data,
+                                 size_t size) {
     try {
-        std::ofstream out(dll_path, std::ios::binary | std::ios::trunc);
+        std::ofstream out(target_path, std::ios::binary | std::ios::trunc);
         if (!out) {
-            ReportError("Failed to open file for writing: " + dll_path.string());
+            ReportError("Failed to open file for writing: " + target_path.string());
             return false;
         }
 
@@ -120,17 +150,24 @@ bool RuntimeManager::ExtractDLL(std::string_view name,
         out.close();
 
         if (!out.good()) {
-            ReportError("Failed to write file: " + dll_path.string());
+            ReportError("Failed to write file: " + target_path.string());
             return false;
         }
 
-        extracted_files_.push_back(dll_path);
+        extracted_files_.push_back(target_path);
         return true;
 
     } catch (const std::exception& e) {
-        ReportError("Exception extracting " + std::string(name) + ": " + e.what());
+        ReportError("Exception extracting " + target_path.string() + ": " + e.what());
         return false;
     }
+}
+
+std::filesystem::path RuntimeManager::GetSleighDirectory() const {
+    if (!initialized_) {
+        return {};
+    }
+    return app_data_dir_ / "sleigh" / "x86";
 }
 
 bool RuntimeManager::SetupDLLSearchPath() {

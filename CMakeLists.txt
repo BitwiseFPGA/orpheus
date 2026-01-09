@@ -49,16 +49,29 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 include(Dependencies)
 
 # ============================================================================
+# Ghidra Decompiler (optional)
+# ============================================================================
+option(ORPHEUS_BUILD_DECOMPILER "Build with Ghidra decompiler support" OFF)
+
+if(ORPHEUS_BUILD_DECOMPILER)
+    message(STATUS "Building with Ghidra decompiler support")
+    add_subdirectory(external/ghidra-decompiler)
+    add_definitions(-DORPHEUS_HAS_GHIDRA_DECOMPILER)
+endif()
+
+# ============================================================================
 # Main Executable
 # ============================================================================
 
-# Collect source files (exclude installer directory)
+# Collect source files (exclude installer and decompiler directories)
 file(GLOB_RECURSE ORPHEUS_SOURCES
     "src/*.cpp"
     "src/**/*.cpp"
 )
 # Remove installer sources from main executable
 list(FILTER ORPHEUS_SOURCES EXCLUDE REGEX ".*installer.*")
+# Remove decompiler sources (added conditionally below)
+list(FILTER ORPHEUS_SOURCES EXCLUDE REGEX ".*decompiler.*")
 
 # Windows resource file (for .exe icon)
 if(WIN32)
@@ -86,6 +99,34 @@ target_link_libraries(orpheus PRIVATE
     Zydis
     unicorn
 )
+
+# Optional: Ghidra decompiler
+if(ORPHEUS_BUILD_DECOMPILER)
+    # Add decompiler wrapper sources
+    file(GLOB DECOMPILER_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/decompiler/*.cpp"
+        "${CMAKE_SOURCE_DIR}/src/decompiler/*.cc"
+    )
+    target_sources(orpheus PRIVATE ${DECOMPILER_SOURCES})
+    target_link_libraries(orpheus PRIVATE ghidra_decompiler)
+    target_include_directories(orpheus PRIVATE
+        ${CMAKE_SOURCE_DIR}/external/ghidra-decompiler/src
+        ${CMAKE_SOURCE_DIR}/src/decompiler
+    )
+
+    # MSVC needs /WHOLEARCHIVE to prevent dead-stripping of static initializers
+    # This ensures PrintCCapability and other capability singletons are linked in
+    if(MSVC)
+        target_link_options(orpheus PRIVATE
+            /WHOLEARCHIVE:ghidra_decompiler
+        )
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # GCC/Clang equivalent: --whole-archive
+        target_link_options(orpheus PRIVATE
+            -Wl,--whole-archive $<TARGET_FILE:ghidra_decompiler> -Wl,--no-whole-archive
+        )
+    endif()
+endif()
 
 # Platform-specific configuration
 if(PLATFORM_WINDOWS)

@@ -47,8 +47,8 @@ struct ModuleInfo {
 struct MemoryRegion {
     uint64_t base_address;
     uint64_t size;
-    uint32_t protection;
-    uint32_t type;
+    std::string protection;
+    std::string type;
     std::string info;
 };
 
