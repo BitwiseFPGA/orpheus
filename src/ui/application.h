@@ -6,6 +6,8 @@
 #include <functional>
 #include <map>
 #include <deque>
+#include <future>
+#include <atomic>
 
 #include "core/dma_interface.h"
 
@@ -209,6 +211,8 @@ private:
 
     // DMA
     std::unique_ptr<DMAInterface> dma_;
+    std::future<bool> dma_connect_future_;
+    std::atomic<bool> dma_connecting_{false};
 
     // Analysis tools
     std::unique_ptr<analysis::Disassembler> disassembler_;

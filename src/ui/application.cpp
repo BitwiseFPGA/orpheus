@@ -582,11 +582,12 @@ void Application::RegisterKeybinds() {
     keybinds_ = {
         // General
         {"Connect DMA", "Connect to DMA device", GLFW_KEY_D, GLFW_MOD_CONTROL, [this]() {
-            if (dma_ && !dma_->IsConnected()) {
-                if (dma_->Initialize("fpga")) {
-                    LOG_INFO("DMA connected");
-                    RefreshProcesses();
-                }
+            if (dma_ && !dma_->IsConnected() && !dma_connecting_) {
+                dma_connecting_ = true;
+                LOG_INFO("Connecting to DMA device...");
+                dma_connect_future_ = std::async(std::launch::async, [this]() {
+                    return dma_->Initialize("fpga");
+                });
             }
         }},
         {"Goto Address", "Jump to address", GLFW_KEY_G, GLFW_MOD_CONTROL, [this]() {
@@ -790,6 +791,21 @@ void Application::EndFrame() {
 }
 
 void Application::RenderDockspace() {
+    // Check for async DMA connection completion
+    if (dma_connecting_ && dma_connect_future_.valid()) {
+        auto status = dma_connect_future_.wait_for(std::chrono::milliseconds(0));
+        if (status == std::future_status::ready) {
+            bool success = dma_connect_future_.get();
+            dma_connecting_ = false;
+            if (success) {
+                LOG_INFO("DMA connected successfully");
+                RefreshProcesses();
+            } else {
+                LOG_ERROR("DMA connection failed");
+            }
+        }
+    }
+
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -854,13 +870,16 @@ void Application::RenderDockspace() {
 void Application::RenderMenuBar() {
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
-            if (ImGui::MenuItem("Connect DMA", "Ctrl+D", false, dma_ && !dma_->IsConnected())) {
-                if (dma_->Initialize("fpga")) {
-                    LOG_INFO("DMA connected successfully");
-                    RefreshProcesses();
-                }
+            if (dma_connecting_) {
+                ImGui::MenuItem("Connecting...", nullptr, false, false);
+            } else if (ImGui::MenuItem("Connect DMA", "Ctrl+D", false, dma_ && !dma_->IsConnected())) {
+                dma_connecting_ = true;
+                LOG_INFO("Connecting to DMA device...");
+                dma_connect_future_ = std::async(std::launch::async, [this]() {
+                    return dma_->Initialize("fpga");
+                });
             }
-            if (ImGui::MenuItem("Disconnect", nullptr, false, dma_ && dma_->IsConnected())) {
+            if (ImGui::MenuItem("Disconnect", nullptr, false, dma_ && dma_->IsConnected() && !dma_connecting_)) {
                 dma_->Close();
                 cached_processes_.clear();
                 cached_modules_.clear();

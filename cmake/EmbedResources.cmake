@@ -1,6 +1,7 @@
 # EmbedResources.cmake
-# Converts binary files (DLLs, etc.) to C++ byte arrays at build time
+# Converts binary files (DLLs/SOs, etc.) to C++ byte arrays at build time
 # This allows embedding all dependencies into a single executable
+# Supports both Windows (.dll) and Linux (.so) platforms
 
 # Function to embed a single resource file as a C++ header
 function(embed_resource resource_file output_file)
@@ -39,9 +40,8 @@ function(embed_resource resource_file output_file)
     message(STATUS "Embedded resource: ${filename} (${filesize} bytes)")
 endfunction()
 
-# Function to embed all DLLs in a directory
+# Function to embed all platform libraries
 function(embed_all_dlls)
-    set(DLL_DIR "${CMAKE_SOURCE_DIR}/resources/dlls")
     set(FONT_DIR "${CMAKE_SOURCE_DIR}/resources/fonts")
     set(SLEIGH_DIR "${CMAKE_SOURCE_DIR}/resources/sleigh/x86")
     set(OUTPUT_DIR "${CMAKE_BINARY_DIR}/generated")
@@ -49,16 +49,33 @@ function(embed_all_dlls)
     # Create output directory
     file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 
-    # List of DLLs to embed
-    set(EMBEDDED_DLLS
-        "${DLL_DIR}/vmm.dll"
-        "${DLL_DIR}/leechcore.dll"
-        "${DLL_DIR}/FTD3XX.dll"
-        "${DLL_DIR}/dbghelp.dll"
-        "${DLL_DIR}/symsrv.dll"
-        "${DLL_DIR}/tinylz4.dll"
-        "${DLL_DIR}/vcruntime140.dll"
-    )
+    # Platform-specific library configuration
+    if(WIN32)
+        set(LIB_DIR "${CMAKE_SOURCE_DIR}/resources/dlls")
+        set(LIB_EXT "dll")
+        set(EMBEDDED_LIBS
+            "${LIB_DIR}/vmm.dll"
+            "${LIB_DIR}/leechcore.dll"
+            "${LIB_DIR}/FTD3XX.dll"
+            "${LIB_DIR}/dbghelp.dll"
+            "${LIB_DIR}/symsrv.dll"
+            "${LIB_DIR}/tinylz4.dll"
+            "${LIB_DIR}/vcruntime140.dll"
+        )
+        set(LIB_COUNT 7)
+    else()
+        set(LIB_DIR "${CMAKE_SOURCE_DIR}/resources/sos")
+        set(LIB_EXT "so")
+        set(EMBEDDED_LIBS
+            "${LIB_DIR}/vmm.so"
+            "${LIB_DIR}/leechcore.so"
+            "${LIB_DIR}/leechcore_ft601_driver_linux.so"
+            "${LIB_DIR}/libpdbcrust.so"
+        )
+        set(LIB_COUNT 4)
+    endif()
+
+    message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}, embedding ${LIB_COUNT} libraries from ${LIB_DIR}")
 
     # List of fonts to embed
     set(EMBEDDED_FONTS
@@ -76,16 +93,16 @@ function(embed_all_dlls)
         "${SLEIGH_DIR}/x86-64-win.cspec"
     )
 
-    # Process each DLL
-    foreach(dll_file ${EMBEDDED_DLLS})
-        if(EXISTS "${dll_file}")
-            get_filename_component(dll_name "${dll_file}" NAME_WE)
-            string(TOLOWER "${dll_name}" dll_name_lower)
-            set(output_file "${OUTPUT_DIR}/embedded_${dll_name_lower}.h")
-            embed_resource("${dll_file}" "${output_file}")
+    # Process each library
+    foreach(lib_file ${EMBEDDED_LIBS})
+        if(EXISTS "${lib_file}")
+            get_filename_component(lib_name "${lib_file}" NAME_WE)
+            string(TOLOWER "${lib_name}" lib_name_lower)
+            set(output_file "${OUTPUT_DIR}/embedded_${lib_name_lower}.h")
+            embed_resource("${lib_file}" "${output_file}")
             list(APPEND EMBEDDED_HEADERS "${output_file}")
         else()
-            message(WARNING "DLL not found: ${dll_file}")
+            message(WARNING "Library not found: ${lib_file}")
         endif()
     endforeach()
 
@@ -151,6 +168,7 @@ function(embed_all_dlls)
     set(MASTER_HEADER "${OUTPUT_DIR}/embedded_resources.h")
     file(WRITE "${MASTER_HEADER}"
         "// Auto-generated master header for all embedded resources\n"
+        "// Platform: ${CMAKE_SYSTEM_NAME}\n"
         "#pragma once\n\n"
     )
 
@@ -172,23 +190,47 @@ function(embed_all_dlls)
         "    const unsigned char* data;\n"
         "    size_t size;\n"
         "};\n\n"
-        "inline constexpr std::array<ResourceInfo, 7> dll_resources = {{\n"
-        "    {\"vmm.dll\", vmm_dll, vmm_dll_size},\n"
-        "    {\"leechcore.dll\", leechcore_dll, leechcore_dll_size},\n"
-        "    {\"FTD3XX.dll\", ftd3xx_dll, ftd3xx_dll_size},\n"
-        "    {\"dbghelp.dll\", dbghelp_dll, dbghelp_dll_size},\n"
-        "    {\"symsrv.dll\", symsrv_dll, symsrv_dll_size},\n"
-        "    {\"tinylz4.dll\", tinylz4_dll, tinylz4_dll_size},\n"
-        "    {\"vcruntime140.dll\", vcruntime140_dll, vcruntime140_dll_size},\n"
-        "}};\n\n"
+    )
+
+    # Platform-specific library resources
+    if(WIN32)
+        file(APPEND "${MASTER_HEADER}"
+            "// Windows DLL resources\n"
+            "inline constexpr std::array<ResourceInfo, 7> lib_resources = {{\n"
+            "    {\"vmm.dll\", vmm_dll, vmm_dll_size},\n"
+            "    {\"leechcore.dll\", leechcore_dll, leechcore_dll_size},\n"
+            "    {\"FTD3XX.dll\", ftd3xx_dll, ftd3xx_dll_size},\n"
+            "    {\"dbghelp.dll\", dbghelp_dll, dbghelp_dll_size},\n"
+            "    {\"symsrv.dll\", symsrv_dll, symsrv_dll_size},\n"
+            "    {\"tinylz4.dll\", tinylz4_dll, tinylz4_dll_size},\n"
+            "    {\"vcruntime140.dll\", vcruntime140_dll, vcruntime140_dll_size},\n"
+            "}};\n\n"
+            "// Legacy aliases for backward compatibility\n"
+            "inline constexpr auto& dll_resources = lib_resources;\n"
+            "inline constexpr auto& resources = lib_resources;\n\n"
+        )
+    else()
+        file(APPEND "${MASTER_HEADER}"
+            "// Linux shared object resources\n"
+            "inline constexpr std::array<ResourceInfo, 4> lib_resources = {{\n"
+            "    {\"vmm.so\", vmm_so, vmm_so_size},\n"
+            "    {\"leechcore.so\", leechcore_so, leechcore_so_size},\n"
+            "    {\"leechcore_ft601_driver_linux.so\", leechcore_ft601_driver_linux_so, leechcore_ft601_driver_linux_so_size},\n"
+            "    {\"libpdbcrust.so\", libpdbcrust_so, libpdbcrust_so_size},\n"
+            "}};\n\n"
+            "// Legacy aliases for backward compatibility\n"
+            "inline constexpr auto& dll_resources = lib_resources;\n"
+            "inline constexpr auto& resources = lib_resources;\n\n"
+        )
+    endif()
+
+    file(APPEND "${MASTER_HEADER}"
         "// Font resources\n"
         "inline constexpr std::array<ResourceInfo, 3> font_resources = {{\n"
         "    {\"JetBrainsMono-Regular.ttf\", jetbrainsmono_regular_ttf, jetbrainsmono_regular_ttf_size},\n"
         "    {\"JetBrainsMono-Bold.ttf\", jetbrainsmono_bold_ttf, jetbrainsmono_bold_ttf_size},\n"
         "    {\"JetBrainsMono-Medium.ttf\", jetbrainsmono_medium_ttf, jetbrainsmono_medium_ttf_size},\n"
         "}};\n\n"
-        "// Legacy alias for backward compatibility\n"
-        "inline constexpr auto& resources = dll_resources;\n\n"
     )
 
     # SLEIGH resources
