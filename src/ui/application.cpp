@@ -682,6 +682,7 @@ void Application::SetupDefaultLayout() {
     // Center - Main views
     ImGui::DockBuilderDockWindow("Memory", dock_main);
     ImGui::DockBuilderDockWindow("Disassembly", dock_main);
+    ImGui::DockBuilderDockWindow("Decompiler", dock_main);
 
     // Right side - Analysis
     ImGui::DockBuilderDockWindow("Pattern Scanner", dock_right);
@@ -3748,6 +3749,139 @@ void Application::RenderCS2EntityInspector() {
             }
         } else {
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Not in game (no local player)");
+        }
+    }
+
+    // Player List Section - enumerate all connected players
+    if (ImGui::CollapsingHeader("Player List")) {
+        // Verified offsets from research
+        constexpr uint32_t OFFSET_PLAYER_NAME = 0x6E8;
+        constexpr uint32_t OFFSET_TEAM_NUM = 0x3EB;
+        constexpr uint32_t OFFSET_PAWN_HANDLE = 0x8FC;
+        constexpr uint32_t OFFSET_PAWN_IS_ALIVE = 0x904;
+        constexpr uint32_t OFFSET_PAWN_HEALTH = 0x908;
+        constexpr uint32_t OFFSET_CONNECTED = 0x6E4;
+        constexpr uint32_t OFFSET_STEAM_ID = 0x770;
+
+        // Read chunk 0 pointer (controllers are in indices 1-64)
+        auto chunk0_ptr_data = dma_->ReadMemory(selected_pid_, cs2_entity_system_ + 0x10, 8);
+        uint64_t chunk0_ptr = 0;
+        if (chunk0_ptr_data.size() >= 8) {
+            std::memcpy(&chunk0_ptr, chunk0_ptr_data.data(), 8);
+        }
+
+        if (chunk0_ptr != 0) {
+            uint64_t chunk0_base = chunk0_ptr & ~0xFULL;  // Mask off flag bits
+
+            // Player table
+            if (ImGui::BeginTable("##PlayerTable", 6,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                ImVec2(0, 200))) {
+
+                ImGui::TableSetupColumn("Idx", ImGuiTableColumnFlags_WidthFixed, 30);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Team", ImGuiTableColumnFlags_WidthFixed, 40);
+                ImGui::TableSetupColumn("HP", ImGuiTableColumnFlags_WidthFixed, 40);
+                ImGui::TableSetupColumn("Bot", ImGuiTableColumnFlags_WidthFixed, 30);
+                ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 80);
+                ImGui::TableHeadersRow();
+
+                for (int idx = 1; idx <= 64; idx++) {
+                    // Calculate entry address: chunk_base + 0x08 + slot * 0x70
+                    uint64_t entry_addr = chunk0_base + 0x08 + idx * 0x70;
+                    auto ctrl_data = dma_->ReadMemory(selected_pid_, entry_addr, 8);
+                    if (ctrl_data.size() < 8) continue;
+
+                    uint64_t controller;
+                    std::memcpy(&controller, ctrl_data.data(), 8);
+                    if (controller == 0 || controller < 0x10000000000ULL) continue;
+
+                    // Check connection state (0=Connected, 1=Connecting, 2=Reconnecting, 3+=Disconnected)
+                    auto conn_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_CONNECTED, 4);
+                    if (conn_data.size() < 4) continue;
+                    uint32_t connected;
+                    std::memcpy(&connected, conn_data.data(), 4);
+                    if (connected > 2) continue;  // Skip disconnected/reserved/never connected
+
+                    // Read player name
+                    auto name_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PLAYER_NAME, 64);
+                    if (name_data.empty()) continue;
+                    std::string name(reinterpret_cast<char*>(name_data.data()));
+                    if (name.empty()) continue;
+
+                    // Read other fields
+                    auto steam_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_STEAM_ID, 8);
+                    uint64_t steam_id = 0;
+                    if (steam_data.size() >= 8) std::memcpy(&steam_id, steam_data.data(), 8);
+                    bool is_bot = (steam_id == 0);
+
+                    auto team_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_TEAM_NUM, 1);
+                    uint8_t team = team_data.size() >= 1 ? team_data[0] : 0;
+
+                    auto alive_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PAWN_IS_ALIVE, 1);
+                    bool is_alive = alive_data.size() >= 1 && alive_data[0] != 0;
+
+                    auto health_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PAWN_HEALTH, 4);
+                    uint32_t health = 0;
+                    if (health_data.size() >= 4) std::memcpy(&health, health_data.data(), 4);
+
+                    ImGui::TableNextRow();
+
+                    // Index
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", idx);
+
+                    // Name
+                    ImGui::TableNextColumn();
+                    if (!is_alive) {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "%s", name.c_str());
+                    } else {
+                        ImGui::Text("%s", name.c_str());
+                    }
+
+                    // Team
+                    ImGui::TableNextColumn();
+                    if (team == 2) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "T");
+                    } else if (team == 3) {
+                        ImGui::TextColored(ImVec4(0.3f, 0.7f, 0.9f, 1.0f), "CT");
+                    } else {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "?");
+                    }
+
+                    // Health
+                    ImGui::TableNextColumn();
+                    if (is_alive) {
+                        ImVec4 hp_color = health > 50 ? ImVec4(0.3f, 1.0f, 0.3f, 1.0f) :
+                                          health > 25 ? ImVec4(1.0f, 1.0f, 0.0f, 1.0f) :
+                                                        ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                        ImGui::TextColored(hp_color, "%d", health);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "-");
+                    }
+
+                    // Bot
+                    ImGui::TableNextColumn();
+                    if (is_bot) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.5f, 0.9f, 1.0f), "Y");
+                    }
+
+                    // Actions
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(idx);
+                    if (ImGui::SmallButton("Inspect")) {
+                        cs2_selected_entity_ = controller;
+                        cs2_selected_entity_class_ = "CCSPlayerController";
+                        cs2_field_cache_.clear();
+                    }
+                    ImGui::PopID();
+                }
+
+                ImGui::EndTable();
+            }
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Entity system not ready");
         }
     }
 

@@ -179,6 +179,8 @@ private:
     std::string HandleCS2Inspect(const std::string& body);
     std::string HandleCS2GetLocalPlayer(const std::string& body);
     std::string HandleCS2GetEntity(const std::string& body);
+    std::string HandleCS2ListPlayers(const std::string& body);
+    std::string HandleCS2GetGameState(const std::string& body);
 
     // Utility
     std::string CreateErrorResponse(const std::string& error);

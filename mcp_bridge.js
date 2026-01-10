@@ -1077,6 +1077,44 @@ const MCP_TOOLS = [
       },
       required: ['pid']
     }
+  },
+  {
+    name: 'cs2_list_players',
+    description: 'List all connected players in CS2 with their controller info. Returns player name, team, health, alive status, entity index, and optionally position and spotted state. Requires cs2_init to be called first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID of Counter-Strike 2'
+        },
+        include_position: {
+          type: 'boolean',
+          description: 'Include player world position (from pawn). Default: false',
+          default: false
+        },
+        include_spotted: {
+          type: 'boolean',
+          description: 'Include spotted state info (who can see this player on radar). Default: false',
+          default: false
+        }
+      },
+      required: ['pid']
+    }
+  },
+  {
+    name: 'cs2_get_game_state',
+    description: 'Get the current CS2 game state. Detects if player is in menu, loading, match lobby, or in-game. Returns state, local player info if in game, and player count. Requires cs2_init to be called first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID of Counter-Strike 2'
+        }
+      },
+      required: ['pid']
+    }
   }
 ];
 
@@ -1137,7 +1175,9 @@ const TOOL_ENDPOINT_MAP = {
   'cs2_read_field': { method: 'POST', path: '/tools/cs2_read_field' },
   'cs2_inspect': { method: 'POST', path: '/tools/cs2_inspect' },
   'cs2_get_local_player': { method: 'POST', path: '/tools/cs2_get_local_player' },
-  'cs2_get_entity': { method: 'POST', path: '/tools/cs2_get_entity' }
+  'cs2_get_entity': { method: 'POST', path: '/tools/cs2_get_entity' },
+  'cs2_list_players': { method: 'POST', path: '/tools/cs2_list_players' },
+  'cs2_get_game_state': { method: 'POST', path: '/tools/cs2_get_game_state' }
 };
 
 /**

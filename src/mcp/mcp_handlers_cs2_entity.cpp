@@ -885,4 +885,286 @@ std::string MCPServer::HandleCS2GetEntity(const std::string& body) {
     }
 }
 
+std::string MCPServer::HandleCS2ListPlayers(const std::string& body) {
+    try {
+        json req = json::parse(body);
+        uint32_t pid = req.value("pid", 0);
+        bool include_bots = req.value("include_bots", true);
+        bool include_position = req.value("include_position", false);
+        bool include_spotted = req.value("include_spotted", false);
+
+        if (pid == 0) {
+            return CreateErrorResponse("Missing required parameter: pid");
+        }
+
+        if (!cs2_entity_cache_.initialized || cs2_entity_cache_.entity_system == 0) {
+            return CreateErrorResponse("CS2 Entity system not initialized - call cs2_init first");
+        }
+
+        auto* dma = app_->GetDMA();
+        if (!dma || !dma->IsConnected()) {
+            return CreateErrorResponse("DMA not connected");
+        }
+
+        auto reader = utils::MakeReader(dma, pid);
+
+        // Verified offsets from research
+        constexpr uint32_t OFFSET_PLAYER_NAME = 0x6E8;      // m_iszPlayerName
+        constexpr uint32_t OFFSET_TEAM_NUM = 0x3EB;         // m_iTeamNum (on controller)
+        constexpr uint32_t OFFSET_PAWN_HANDLE = 0x8FC;      // m_hPlayerPawn
+        constexpr uint32_t OFFSET_PAWN_IS_ALIVE = 0x904;    // m_bPawnIsAlive
+        constexpr uint32_t OFFSET_PAWN_HEALTH = 0x908;      // m_iPawnHealth
+        constexpr uint32_t OFFSET_CONNECTED = 0x6E4;        // m_iConnected
+        constexpr uint32_t OFFSET_STEAM_ID = 0x770;         // m_steamID
+        constexpr uint32_t OFFSET_IS_LOCAL = 0x778;         // m_bIsLocalPlayerController
+
+        // Pawn offsets
+        constexpr uint32_t OFFSET_PAWN_TEAM = 0x3EB;        // m_iTeamNum on pawn
+        constexpr uint32_t OFFSET_SCENE_NODE = 0x330;       // m_pGameSceneNode
+        constexpr uint32_t OFFSET_ABS_ORIGIN = 0xD0;        // m_vecAbsOrigin on scene node
+
+        // EntitySpottedState_t offsets (relative to pawn + 0x2700)
+        constexpr uint32_t OFFSET_SPOTTED_STATE = 0x2700;   // m_entitySpottedState
+        constexpr uint32_t OFFSET_SPOTTED = 0x08;           // m_bSpotted within EntitySpottedState_t
+        constexpr uint32_t OFFSET_SPOTTED_MASK = 0x0C;      // m_bSpottedByMask within EntitySpottedState_t
+
+        // Read chunk 0 pointer (player controllers are in indices 1-64)
+        auto chunk0_ptr = reader.ReadPtr(cs2_entity_cache_.entity_system + 0x10);
+        if (!chunk0_ptr || *chunk0_ptr == 0) {
+            return CreateErrorResponse("Failed to read entity chunk 0");
+        }
+        uint64_t chunk0_base = *chunk0_ptr & ~0xFULL;
+
+        json result;
+        json players = json::array();
+        int player_count = 0;
+
+        // Iterate through controller indices 1-64
+        for (int idx = 1; idx <= 64; idx++) {
+            // Calculate entry address: chunk_base + 0x08 + slot * 0x70
+            uint64_t entry_addr = chunk0_base + 0x08 + idx * 0x70;
+            auto controller = reader.ReadPtr(entry_addr);
+
+            if (!controller || *controller == 0) continue;
+
+            // Check if it's a valid pointer (not a module address)
+            if (*controller < 0x10000000000ULL) continue;
+
+            // Read connection state (PlayerConnectedState: 0=Connected, 1=Connecting, 2=Reconnecting, 3+=Disconnected)
+            auto connected = reader.ReadU32(*controller + OFFSET_CONNECTED);
+            if (!connected || *connected > 2) continue; // Skip disconnected/reserved/never connected
+
+            // Read player name
+            auto name_data = dma->ReadMemory(pid, *controller + OFFSET_PLAYER_NAME, 64);
+            if (name_data.empty()) continue;
+            std::string name(reinterpret_cast<char*>(name_data.data()));
+            if (name.empty()) continue;
+
+            // Read Steam ID to check for bots
+            auto steam_id = reader.ReadU64(*controller + OFFSET_STEAM_ID);
+            bool is_bot = steam_id && *steam_id == 0;
+            if (!include_bots && is_bot) continue;
+
+            // Read pawn handle and alive status
+            auto pawn_handle = reader.ReadU32(*controller + OFFSET_PAWN_HANDLE);
+            auto is_alive = reader.ReadU8(*controller + OFFSET_PAWN_IS_ALIVE);
+            auto health = reader.ReadU32(*controller + OFFSET_PAWN_HEALTH);
+            auto team = reader.ReadU8(*controller + OFFSET_TEAM_NUM);
+            auto is_local = reader.ReadU8(*controller + OFFSET_IS_LOCAL);
+
+            json player;
+            player["index"] = idx;
+            player["controller"] = FormatAddress(*controller);
+            player["name"] = name;
+            player["team"] = team ? *team : 0;
+            player["team_name"] = (team && *team == 2) ? "T" : (team && *team == 3) ? "CT" : "SPEC";
+            player["is_alive"] = is_alive && *is_alive != 0;
+            player["health"] = health ? *health : 0;
+            player["is_bot"] = is_bot;
+            player["is_local"] = is_local && *is_local != 0;
+
+            if (pawn_handle && *pawn_handle != 0) {
+                int pawn_index = *pawn_handle & 0x7FFF;
+                player["pawn_handle"] = *pawn_handle;
+                player["pawn_index"] = pawn_index;
+
+                // Resolve pawn for position and/or spotted state
+                if ((include_position || include_spotted) && is_alive && *is_alive) {
+                    int chunk_idx = pawn_index / 512;
+                    int slot = pawn_index % 512;
+
+                    auto pawn_chunk = reader.ReadPtr(cs2_entity_cache_.entity_system + 0x10 + chunk_idx * 8);
+                    if (pawn_chunk && *pawn_chunk != 0) {
+                        uint64_t pawn_chunk_base = *pawn_chunk & ~0xFULL;
+                        auto pawn = reader.ReadPtr(pawn_chunk_base + 0x08 + slot * 0x70);
+
+                        if (pawn && *pawn != 0) {
+                            player["pawn"] = FormatAddress(*pawn);
+
+                            // Read position via GameSceneNode
+                            if (include_position) {
+                                auto scene_node = reader.ReadPtr(*pawn + OFFSET_SCENE_NODE);
+                                if (scene_node && *scene_node != 0) {
+                                    auto pos_data = dma->ReadMemory(pid, *scene_node + OFFSET_ABS_ORIGIN, 12);
+                                    if (pos_data.size() >= 12) {
+                                        float x, y, z;
+                                        std::memcpy(&x, pos_data.data(), 4);
+                                        std::memcpy(&y, pos_data.data() + 4, 4);
+                                        std::memcpy(&z, pos_data.data() + 8, 4);
+                                        player["position"] = {{"x", x}, {"y", y}, {"z", z}};
+                                    }
+                                }
+                            }
+
+                            // Read EntitySpottedState_t
+                            if (include_spotted) {
+                                // m_bSpotted at pawn + 0x2700 + 0x08
+                                auto spotted = reader.ReadU8(*pawn + OFFSET_SPOTTED_STATE + OFFSET_SPOTTED);
+                                if (spotted) {
+                                    player["is_spotted"] = *spotted != 0;
+                                }
+
+                                // m_bSpottedByMask at pawn + 0x2700 + 0x0C (uint32[2])
+                                auto mask_data = dma->ReadMemory(pid, *pawn + OFFSET_SPOTTED_STATE + OFFSET_SPOTTED_MASK, 8);
+                                if (mask_data.size() >= 8) {
+                                    uint32_t mask_low, mask_high;
+                                    std::memcpy(&mask_low, mask_data.data(), 4);
+                                    std::memcpy(&mask_high, mask_data.data() + 4, 4);
+
+                                    // Convert to list of player indices who spotted this entity
+                                    json spotted_by = json::array();
+                                    for (int bit = 0; bit < 32; bit++) {
+                                        if (mask_low & (1 << bit)) spotted_by.push_back(bit);
+                                    }
+                                    for (int bit = 0; bit < 32; bit++) {
+                                        if (mask_high & (1 << bit)) spotted_by.push_back(32 + bit);
+                                    }
+                                    player["spotted_by_mask"] = {mask_low, mask_high};
+                                    player["spotted_by"] = spotted_by;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            players.push_back(player);
+            player_count++;
+        }
+
+        result["players"] = players;
+        result["count"] = player_count;
+        result["entity_system"] = FormatAddress(cs2_entity_cache_.entity_system);
+
+        return CreateSuccessResponse(result.dump());
+
+    } catch (const std::exception& e) {
+        return CreateErrorResponse(std::string("Error: ") + e.what());
+    }
+}
+
+std::string MCPServer::HandleCS2GetGameState(const std::string& body) {
+    try {
+        json req = json::parse(body);
+        uint32_t pid = req.value("pid", 0);
+
+        if (pid == 0) {
+            return CreateErrorResponse("Missing required parameter: pid");
+        }
+
+        auto* dma = app_->GetDMA();
+        if (!dma || !dma->IsConnected()) {
+            return CreateErrorResponse("DMA not connected");
+        }
+
+        json result;
+        result["pid"] = pid;
+
+        // Check if CS2 modules are loaded
+        auto client_mod = dma->GetModuleByName(pid, "client.dll");
+        auto engine_mod = dma->GetModuleByName(pid, "engine2.dll");
+
+        result["client_loaded"] = client_mod.has_value();
+        result["engine_loaded"] = engine_mod.has_value();
+
+        if (!client_mod) {
+            result["state"] = "not_in_game";
+            result["message"] = "client.dll not loaded - likely in main menu or loading";
+            return CreateSuccessResponse(result.dump());
+        }
+
+        // Check entity system initialization
+        if (!cs2_entity_cache_.initialized) {
+            result["state"] = "not_initialized";
+            result["message"] = "Entity system not initialized - call cs2_init first";
+            return CreateSuccessResponse(result.dump());
+        }
+
+        auto reader = utils::MakeReader(dma, pid);
+
+        // Read highest entity index from EntitySystem + 0x20F0
+        constexpr uint32_t OFFSET_HIGHEST_ENTITY = 0x20F0;
+        auto highest_entity = reader.ReadI32(cs2_entity_cache_.entity_system + OFFSET_HIGHEST_ENTITY);
+
+        result["entity_system"] = FormatAddress(cs2_entity_cache_.entity_system);
+        result["highest_entity_index"] = highest_entity ? *highest_entity : 0;
+
+        // Check if local player controller exists
+        auto local_controller = reader.ReadPtr(cs2_entity_cache_.local_player_controller);
+        bool has_local_player = local_controller && *local_controller != 0;
+        result["has_local_player"] = has_local_player;
+
+        // Determine game state based on entity count and local player
+        if (!highest_entity || *highest_entity < 10) {
+            result["state"] = "menu";
+            result["message"] = "Very few entities - likely in main menu";
+        } else if (!has_local_player) {
+            result["state"] = "loading";
+            result["message"] = "Entities exist but no local player - loading or spectating";
+        } else {
+            // Count player controllers to determine if in match
+            int player_count = 0;
+            auto chunk0_ptr = reader.ReadPtr(cs2_entity_cache_.entity_system + 0x10);
+            if (chunk0_ptr && *chunk0_ptr != 0) {
+                uint64_t chunk0_base = *chunk0_ptr & ~0xFULL;
+                for (int i = 1; i <= 64; i++) {
+                    auto controller = reader.ReadPtr(chunk0_base + 0x08 + i * 0x70);
+                    if (controller && *controller != 0 && *controller > 0x10000000000ULL) {
+                        auto connected = reader.ReadU32(*controller + 0x6E4);
+                        if (connected && *connected <= 2) {  // 0=Connected, 1=Connecting, 2=Reconnecting
+                            player_count++;
+                        }
+                    }
+                }
+            }
+
+            result["connected_players"] = player_count;
+
+            if (player_count > 1) {
+                result["state"] = "in_match";
+                result["message"] = "In active match with " + std::to_string(player_count) + " players";
+            } else if (player_count == 1) {
+                result["state"] = "in_game_solo";
+                result["message"] = "In game solo (practice/workshop)";
+            } else {
+                result["state"] = "in_game";
+                result["message"] = "In game";
+            }
+        }
+
+        // Additional info: read local player health if available
+        if (has_local_player) {
+            auto health = reader.ReadU32(*local_controller + 0x908);
+            auto alive = reader.ReadU8(*local_controller + 0x904);
+            if (health) result["local_health"] = *health;
+            if (alive) result["local_alive"] = *alive != 0;
+        }
+
+        return CreateSuccessResponse(result.dump());
+
+    } catch (const std::exception& e) {
+        return CreateErrorResponse(std::string("Error: ") + e.what());
+    }
+}
+
 } // namespace orpheus::mcp

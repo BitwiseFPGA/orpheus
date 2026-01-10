@@ -350,6 +350,8 @@ void MCPServer::SetupRoutes() {
     ROUTE_POST_PERM("/tools/cs2_inspect", allow_cs2_schema, "CS2Entity", HandleCS2Inspect);
     ROUTE_POST_PERM("/tools/cs2_get_local_player", allow_cs2_schema, "CS2Entity", HandleCS2GetLocalPlayer);
     ROUTE_POST_PERM("/tools/cs2_get_entity", allow_cs2_schema, "CS2Entity", HandleCS2GetEntity);
+    ROUTE_POST_PERM("/tools/cs2_list_players", allow_cs2_schema, "CS2Entity", HandleCS2ListPlayers);
+    ROUTE_POST_PERM("/tools/cs2_get_game_state", allow_cs2_schema, "CS2Entity", HandleCS2GetGameState);
 
     #undef ROUTE_POST
     #undef ROUTE_POST_PERM

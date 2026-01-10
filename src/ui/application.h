@@ -95,7 +95,7 @@ struct PanelState {
     bool emulator = false;
     bool cs2_schema = false;  // CS2-specific schema dumper
     bool cs2_entity_inspector = false;  // CS2 entity inspector (RTTI + Schema)
-    bool decompiler = false;  // Ghidra decompiler view
+    bool decompiler = true;  // Ghidra decompiler view (shown by default)
 };
 
 /**
