@@ -84,6 +84,12 @@ public:
     [[nodiscard]] std::filesystem::path GetSleighDirectory() const;
 
     /**
+     * Get the resources directory path (runtime assets like map images, icons)
+     * This is typically located next to the executable as resources/
+     */
+    [[nodiscard]] std::filesystem::path GetResourceDirectory() const;
+
+    /**
      * Get list of all extracted files
      */
     [[nodiscard]] const std::vector<std::filesystem::path>& GetExtractedFiles() const {

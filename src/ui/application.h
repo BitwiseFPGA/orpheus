@@ -14,6 +14,7 @@
 // Forward declarations
 struct GLFWwindow;
 struct ImFont;
+struct ImVec2;
 
 namespace orpheus {
 
@@ -103,6 +104,8 @@ struct PanelState {
     bool cs2_entity_inspector = false;  // CS2 entity inspector (RTTI + Schema)
     bool decompiler = true;  // Ghidra decompiler view (shown by default)
     bool cfg_viewer = false;  // Control Flow Graph visualization
+    bool cs2_radar = false;  // CS2 Live Radar view
+    bool cs2_dashboard = false;  // CS2 Player Dashboard
 };
 
 /**
@@ -168,6 +171,8 @@ private:
     void RenderCS2EntityInspector();
     void RenderDecompiler();
     void RenderCFGViewer();
+    void RenderCS2Radar();
+    void RenderCS2Dashboard();
 
     // Dialogs
     void RenderCommandPalette();
@@ -188,6 +193,10 @@ private:
     bool CanNavigateBack() const { return history_index_ > 0; }
     bool CanNavigateForward() const { return history_index_ >= 0 && history_index_ < (int)address_history_.size() - 1; }
     void DumpModule(uint64_t base_address, uint32_t size, const std::string& name);
+
+    // CS2 auto-initialization
+    bool InitializeCS2();  // Returns true if CS2 was initialized successfully
+    bool IsCS2Process() const;
 
     void Shutdown();
 
@@ -397,6 +406,10 @@ private:
     std::string cs2_selected_class_;
     std::vector<orpheus::dumper::SchemaClass> cs2_cached_classes_;
 
+    // CS2 auto-init state
+    bool cs2_auto_init_attempted_ = false;  // Prevent repeated init attempts on failure
+    bool cs2_auto_init_success_ = false;    // Track if auto-init succeeded
+
     // CS2 Entity Inspector state
     bool cs2_entity_initialized_ = false;
     uint64_t cs2_entity_system_ = 0;
@@ -425,6 +438,54 @@ private:
         std::string value;
     };
     std::vector<FieldCacheEntry> cs2_field_cache_;
+
+    // CS2 Radar state
+    struct MapInfo {
+        std::string name;
+        float pos_x = 0.0f;   // World X offset
+        float pos_y = 0.0f;   // World Y offset
+        float scale = 1.0f;   // World units per pixel
+        unsigned int texture_id = 0;
+        int texture_width = 0;
+        int texture_height = 0;
+        bool loaded = false;
+    };
+    MapInfo radar_map_;
+    std::string radar_current_map_;  // e.g., "de_dust2"
+    std::string radar_detected_map_; // Auto-detected from CS2 memory
+    uint64_t radar_map_name_addr_ = 0; // Cached address of map name string
+    bool radar_auto_detect_map_ = true; // Auto-detect map from CS2 memory
+    float radar_zoom_ = 1.0f;
+    float radar_scroll_x_ = 0.0f;
+    float radar_scroll_y_ = 0.0f;
+    bool radar_center_on_local_ = true;
+    bool radar_show_names_ = true;
+    bool radar_auto_refresh_ = true;
+    float radar_refresh_timer_ = 0.0f;
+    float radar_refresh_interval_ = 0.1f;  // 100ms refresh rate
+
+    // Radar player data cache
+    struct RadarPlayer {
+        std::string name;
+        int team = 0;           // 2=T, 3=CT
+        float x = 0, y = 0, z = 0;
+        int health = 0;
+        bool is_alive = false;
+        bool is_local = false;
+        bool is_spotted = false;
+    };
+    std::vector<RadarPlayer> radar_players_;
+
+    // CS2 Dashboard state
+    bool dashboard_show_all_players_ = true;
+    bool dashboard_show_bots_ = false;
+    int dashboard_selected_player_ = -1;
+
+    // Helper functions for radar
+    bool LoadRadarMap(const std::string& map_name);
+    void UnloadRadarMap();
+    void RefreshRadarData();
+    ImVec2 WorldToRadar(float world_x, float world_y, const ImVec2& canvas_pos, const ImVec2& canvas_size);
 };
 
 } // namespace ui

@@ -171,6 +171,36 @@ std::filesystem::path RuntimeManager::GetSleighDirectory() const {
     return app_data_dir_ / "sleigh" / "x86";
 }
 
+std::filesystem::path RuntimeManager::GetResourceDirectory() const {
+    namespace fs = std::filesystem;
+
+    // Resources are shipped next to the executable in resources/
+    // or in the app data directory for installed versions
+
+    // First try: next to executable (for development and portable installs)
+#ifdef PLATFORM_LINUX
+    // On Linux, check /proc/self/exe for the executable path
+    fs::path exe_path = fs::read_symlink("/proc/self/exe");
+    fs::path exe_dir = exe_path.parent_path();
+    fs::path resources = exe_dir / "resources";
+    if (fs::exists(resources)) {
+        return resources;
+    }
+#else
+    // On Windows, use GetModuleFileName
+    char path[MAX_PATH];
+    GetModuleFileNameA(nullptr, path, MAX_PATH);
+    fs::path exe_dir = fs::path(path).parent_path();
+    fs::path resources = exe_dir / "resources";
+    if (fs::exists(resources)) {
+        return resources;
+    }
+#endif
+
+    // Fall back to app data directory
+    return app_data_dir_ / "resources";
+}
+
 bool RuntimeManager::SetupDLLSearchPath() {
     auto dll_dir = app_data_dir_ / "dlls";
 

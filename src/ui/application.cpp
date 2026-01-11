@@ -23,6 +23,11 @@
 
 #include <GLFW/glfw3.h>
 
+// OpenGL for texture functions
+#ifdef PLATFORM_LINUX
+#include <GL/gl.h>
+#endif
+
 // stb_image for icon loading
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -891,6 +896,8 @@ void Application::RenderDockspace() {
     if (panels_.cs2_schema) RenderCS2Schema();
     if (panels_.cs2_entity_inspector) RenderCS2EntityInspector();
     if (panels_.cfg_viewer) RenderCFGViewer();
+    if (panels_.cs2_radar) RenderCS2Radar();
+    if (panels_.cs2_dashboard) RenderCS2Dashboard();
     if (panels_.console) RenderConsole();
 
     // Dialogs
@@ -956,6 +963,9 @@ void Application::RenderMenuBar() {
             if (ImGui::BeginMenu("Game Tools")) {
                 ImGui::MenuItem("CS2 Schema Dumper", "Ctrl+Shift+C", &panels_.cs2_schema);
                 ImGui::MenuItem("CS2 Entity Inspector", "Ctrl+Shift+E", &panels_.cs2_entity_inspector);
+                ImGui::Separator();
+                ImGui::MenuItem("CS2 Radar", "Ctrl+Shift+R", &panels_.cs2_radar);
+                ImGui::MenuItem("CS2 Dashboard", "Ctrl+Shift+P", &panels_.cs2_dashboard);
                 ImGui::EndMenu();
             }
             ImGui::Separator();
@@ -1050,6 +1060,62 @@ void Application::RenderMenuBar() {
             }
 
             ImGui::EndMenu();
+        }
+
+        // CS2 menu - only show when CS2 is selected
+        if (IsCS2Process()) {
+            if (ImGui::BeginMenu("CS2")) {
+                // Status indicator
+                if (cs2_auto_init_success_) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 1.0f, 0.3f, 1.0f));
+                    ImGui::Text("Status: Initialized");
+                    ImGui::PopStyleColor();
+                } else if (cs2_auto_init_attempted_) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
+                    ImGui::Text("Status: Partial Init");
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                    ImGui::Text("Status: Not Initialized");
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Separator();
+
+                // Re-initialize button
+                if (ImGui::MenuItem("Re-initialize CS2", nullptr, false, cs2_auto_init_attempted_)) {
+                    cs2_schema_initialized_ = false;
+                    cs2_entity_initialized_ = false;
+                    cs2_auto_init_attempted_ = true;
+                    cs2_auto_init_success_ = false;
+                    radar_map_name_addr_ = 0;
+                    InitializeCS2();
+                }
+                ImGui::Separator();
+
+                // Quick panel access
+                ImGui::TextDisabled("Panels:");
+                ImGui::MenuItem("Radar", "Ctrl+Shift+R", &panels_.cs2_radar);
+                ImGui::MenuItem("Dashboard", "Ctrl+Shift+P", &panels_.cs2_dashboard);
+                ImGui::MenuItem("Schema Dumper", "Ctrl+Shift+C", &panels_.cs2_schema);
+                ImGui::MenuItem("Entity Inspector", "Ctrl+Shift+E", &panels_.cs2_entity_inspector);
+
+                // Open all CS2 panels
+                ImGui::Separator();
+                if (ImGui::MenuItem("Open All CS2 Panels")) {
+                    panels_.cs2_radar = true;
+                    panels_.cs2_dashboard = true;
+                    panels_.cs2_schema = true;
+                    panels_.cs2_entity_inspector = true;
+                }
+
+                // Map info
+                if (!radar_detected_map_.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Current Map: %s", radar_detected_map_.c_str());
+                }
+
+                ImGui::EndMenu();
+            }
         }
 
         if (ImGui::BeginMenu("Help")) {
@@ -1262,8 +1328,19 @@ void Application::RenderProcessList() {
                     ImGuiSelectableFlags_SpanAllColumns)) {
                     selected_pid_ = proc.pid;
                     selected_process_name_ = proc.name;
+
+                    // Reset CS2 state on process change
+                    cs2_auto_init_attempted_ = false;
+                    cs2_auto_init_success_ = false;
+
                     RefreshModules();
                     LOG_INFO("Selected process: {} (PID: {})", proc.name, proc.pid);
+
+                    // Auto-initialize CS2 systems if this is CS2
+                    if (IsCS2Process()) {
+                        cs2_auto_init_attempted_ = true;
+                        InitializeCS2();
+                    }
                 }
                 ImGui::PopID();
 
@@ -4359,6 +4436,170 @@ void Application::RefreshModules() {
     }
 }
 
+bool Application::IsCS2Process() const {
+    std::string name_lower = selected_process_name_;
+    std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+    return name_lower.find("cs2") != std::string::npos;
+}
+
+bool Application::InitializeCS2() {
+    if (!dma_ || !dma_->IsConnected() || selected_pid_ == 0) {
+        return false;
+    }
+
+    if (!IsCS2Process()) {
+        return false;
+    }
+
+    LOG_INFO("Auto-initializing CS2 systems...");
+
+    // Find required modules
+    uint64_t schemasystem_base = 0;
+    uint64_t client_base = 0;
+    uint32_t client_size = 0;
+
+    for (const auto& mod : cached_modules_) {
+        std::string name_lower = mod.name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+        if (name_lower == "schemasystem.dll") {
+            schemasystem_base = mod.base_address;
+        } else if (name_lower == "client.dll") {
+            client_base = mod.base_address;
+            client_size = mod.size;
+        }
+    }
+
+    if (schemasystem_base == 0) {
+        LOG_WARN("CS2 auto-init: schemasystem.dll not found - game may still be loading");
+        return false;
+    }
+
+    if (client_base == 0) {
+        LOG_WARN("CS2 auto-init: client.dll not found - game may still be loading");
+        return false;
+    }
+
+    // Initialize Schema System
+    if (!cs2_schema_initialized_ || cs2_schema_pid_ != selected_pid_) {
+        cs2_schema_ = std::make_unique<orpheus::dumper::CS2SchemaDumper>(dma_.get(), selected_pid_);
+        if (cs2_schema_->Initialize(schemasystem_base)) {
+            cs2_schema_pid_ = selected_pid_;
+            cs2_schema_initialized_ = true;
+            LOG_INFO("CS2 Schema System initialized");
+        } else {
+            LOG_ERROR("Failed to initialize CS2 Schema Dumper: {}", cs2_schema_->GetLastError());
+            cs2_schema_.reset();
+            return false;
+        }
+    }
+
+    // Initialize Entity System
+    if (!cs2_entity_initialized_) {
+        cs2_client_base_ = client_base;
+        cs2_client_size_ = client_size;
+
+        // Read a portion of client.dll for pattern scanning (first 20MB)
+        size_t scan_size = std::min(static_cast<size_t>(client_size), static_cast<size_t>(20 * 1024 * 1024));
+        auto client_data = dma_->ReadMemory(selected_pid_, client_base, scan_size);
+
+        if (!client_data.empty()) {
+            // Pattern scan for CGameEntitySystem
+            auto entity_pattern = analysis::PatternScanner::Compile(
+                "48 8B 0D ?? ?? ?? ?? 8B D3 E8 ?? ?? ?? ?? 48 8B F0", "EntitySystem");
+
+            if (entity_pattern) {
+                auto entity_results = analysis::PatternScanner::Scan(
+                    client_data, *entity_pattern, client_base, 1);
+
+                if (!entity_results.empty()) {
+                    uint64_t instr_addr = entity_results[0];
+                    auto offset_data = dma_->ReadMemory(selected_pid_, instr_addr + 3, 4);
+                    if (offset_data.size() >= 4) {
+                        int32_t rip_offset;
+                        std::memcpy(&rip_offset, offset_data.data(), 4);
+                        uint64_t ptr_addr = instr_addr + 7 + rip_offset;
+
+                        auto ptr_data = dma_->ReadMemory(selected_pid_, ptr_addr, 8);
+                        if (ptr_data.size() >= 8) {
+                            std::memcpy(&cs2_entity_system_, ptr_data.data(), 8);
+                            LOG_INFO("Found CGameEntitySystem: 0x{:X}", cs2_entity_system_);
+                        }
+                    }
+                }
+            }
+
+            // Pattern scan for LocalPlayerController array
+            auto lpc_pattern = analysis::PatternScanner::Compile(
+                "48 8D 0D ?? ?? ?? ?? 48 8B 04 C1", "LocalPlayerArray");
+
+            if (lpc_pattern) {
+                auto lpc_results = analysis::PatternScanner::Scan(
+                    client_data, *lpc_pattern, client_base, 1);
+
+                if (!lpc_results.empty()) {
+                    uint64_t instr_addr = lpc_results[0];
+                    auto offset_data = dma_->ReadMemory(selected_pid_, instr_addr + 3, 4);
+                    if (offset_data.size() >= 4) {
+                        int32_t rip_offset;
+                        std::memcpy(&rip_offset, offset_data.data(), 4);
+                        cs2_local_player_array_ = instr_addr + 7 + rip_offset;
+                        LOG_INFO("Found LocalPlayerController array: 0x{:X}", cs2_local_player_array_);
+                    }
+                }
+            }
+
+            // Pattern scan for map name (GlobalVars->mapname or similar)
+            // Pattern: 48 8B 05 ?? ?? ?? ?? 48 8B 88 ?? ?? ?? ?? E8 (GlobalVars access)
+            auto globals_pattern = analysis::PatternScanner::Compile(
+                "48 89 15 ?? ?? ?? ?? 48 89 42 60", "GlobalVars");
+
+            if (globals_pattern) {
+                auto globals_results = analysis::PatternScanner::Scan(
+                    client_data, *globals_pattern, client_base, 1);
+
+                if (!globals_results.empty()) {
+                    uint64_t instr_addr = globals_results[0];
+                    auto offset_data = dma_->ReadMemory(selected_pid_, instr_addr + 3, 4);
+                    if (offset_data.size() >= 4) {
+                        int32_t rip_offset;
+                        std::memcpy(&rip_offset, offset_data.data(), 4);
+                        uint64_t globals_ptr = instr_addr + 7 + rip_offset;
+
+                        auto ptr_data = dma_->ReadMemory(selected_pid_, globals_ptr, 8);
+                        if (ptr_data.size() >= 8) {
+                            uint64_t global_vars;
+                            std::memcpy(&global_vars, ptr_data.data(), 8);
+                            // Map name is at offset 0x188 in GlobalVars
+                            radar_map_name_addr_ = global_vars + 0x188;
+                            LOG_INFO("Found GlobalVars: 0x{:X}, map name at 0x{:X}",
+                                global_vars, radar_map_name_addr_);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cs2_entity_system_ != 0 && cs2_local_player_array_ != 0) {
+            cs2_entity_initialized_ = true;
+            LOG_INFO("CS2 Entity System initialized successfully");
+        } else {
+            LOG_WARN("CS2 Entity System partially initialized - some patterns not found");
+        }
+    }
+
+    // Mark auto-init as successful if at least schema is initialized
+    cs2_auto_init_success_ = cs2_schema_initialized_;
+
+    if (cs2_auto_init_success_) {
+        // Auto-open CS2 panels
+        panels_.cs2_radar = true;
+        panels_.cs2_dashboard = true;
+        LOG_INFO("CS2 auto-initialization complete - radar and dashboard enabled");
+    }
+
+    return cs2_auto_init_success_;
+}
+
 void Application::NavigateToAddress(uint64_t address, bool add_to_history) {
     // Add to history if this is a user navigation (not back/forward)
     if (add_to_history && address != 0) {
@@ -5400,6 +5641,805 @@ void Application::RenderCFGViewer() {
             }
         }
     }
+
+    ImGui::End();
+}
+
+// ============================================================================
+// CS2 Radar Panel
+// ============================================================================
+
+bool Application::LoadRadarMap(const std::string& map_name) {
+    // Unload any existing map
+    UnloadRadarMap();
+
+    // Try embedded resources first
+    if constexpr (orpheus::embedded::has_maps) {
+        const auto* map_res = orpheus::embedded::GetMapResource(map_name);
+        if (map_res) {
+            // Parse info from embedded data
+            std::string info_str(reinterpret_cast<const char*>(map_res->info_data), map_res->info_size);
+            std::istringstream info_stream(info_str);
+            std::string line;
+            while (std::getline(info_stream, line)) {
+                if (line.find("pos_x") != std::string::npos) {
+                    size_t quote1 = line.find_last_of("\"");
+                    if (quote1 != std::string::npos) {
+                        size_t quote2 = line.rfind("\"", quote1 - 1);
+                        if (quote2 != std::string::npos) {
+                            radar_map_.pos_x = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                        }
+                    }
+                } else if (line.find("pos_y") != std::string::npos) {
+                    size_t quote1 = line.find_last_of("\"");
+                    if (quote1 != std::string::npos) {
+                        size_t quote2 = line.rfind("\"", quote1 - 1);
+                        if (quote2 != std::string::npos) {
+                            radar_map_.pos_y = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                        }
+                    }
+                } else if (line.find("scale") != std::string::npos) {
+                    size_t quote1 = line.find_last_of("\"");
+                    if (quote1 != std::string::npos) {
+                        size_t quote2 = line.rfind("\"", quote1 - 1);
+                        if (quote2 != std::string::npos) {
+                            radar_map_.scale = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                        }
+                    }
+                }
+            }
+            LOG_INFO("Map info loaded from embedded: pos_x={}, pos_y={}, scale={}",
+                     radar_map_.pos_x, radar_map_.pos_y, radar_map_.scale);
+
+            // Load radar image from embedded data
+            int width, height, channels;
+            unsigned char* pixels = stbi_load_from_memory(
+                map_res->radar_data, static_cast<int>(map_res->radar_size),
+                &width, &height, &channels, 4);
+
+            if (pixels) {
+                // Create OpenGL texture
+                GLuint texture_id;
+                glGenTextures(1, &texture_id);
+                glBindTexture(GL_TEXTURE_2D, texture_id);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+                stbi_image_free(pixels);
+
+                radar_map_.texture_id = texture_id;
+                radar_map_.texture_width = width;
+                radar_map_.texture_height = height;
+                radar_map_.name = map_name;
+                radar_map_.loaded = true;
+
+                LOG_INFO("Radar map loaded from embedded: {} ({}x{})", map_name, width, height);
+                return true;
+            }
+        }
+    }
+
+    // Fall back to filesystem loading
+    namespace fs = std::filesystem;
+    fs::path resources_dir = RuntimeManager::Instance().GetResourceDirectory();
+    fs::path map_dir = resources_dir / "maps" / map_name;
+
+    // Look for radar image
+    fs::path radar_image;
+    for (const auto& filename : {"radar.png", "radar.jpg", "radar_psd.png"}) {
+        fs::path candidate = map_dir / filename;
+        if (fs::exists(candidate)) {
+            radar_image = candidate;
+            break;
+        }
+    }
+
+    if (radar_image.empty()) {
+        LOG_WARN("No radar image found for map: {} (looked in {})", map_name, map_dir.string());
+        return false;
+    }
+
+    // Load map info from info.txt
+    fs::path info_path = map_dir / "info.txt";
+    if (fs::exists(info_path)) {
+        std::ifstream info_file(info_path);
+        std::string line;
+        while (std::getline(info_file, line)) {
+            if (line.find("pos_x") != std::string::npos) {
+                size_t quote1 = line.find_last_of("\"");
+                if (quote1 != std::string::npos) {
+                    size_t quote2 = line.rfind("\"", quote1 - 1);
+                    if (quote2 != std::string::npos) {
+                        radar_map_.pos_x = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                    }
+                }
+            } else if (line.find("pos_y") != std::string::npos) {
+                size_t quote1 = line.find_last_of("\"");
+                if (quote1 != std::string::npos) {
+                    size_t quote2 = line.rfind("\"", quote1 - 1);
+                    if (quote2 != std::string::npos) {
+                        radar_map_.pos_y = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                    }
+                }
+            } else if (line.find("scale") != std::string::npos) {
+                size_t quote1 = line.find_last_of("\"");
+                if (quote1 != std::string::npos) {
+                    size_t quote2 = line.rfind("\"", quote1 - 1);
+                    if (quote2 != std::string::npos) {
+                        radar_map_.scale = std::stof(line.substr(quote2 + 1, quote1 - quote2 - 1));
+                    }
+                }
+            }
+        }
+        LOG_INFO("Map info loaded: pos_x={}, pos_y={}, scale={}",
+                 radar_map_.pos_x, radar_map_.pos_y, radar_map_.scale);
+    } else {
+        LOG_WARN("No info.txt found for map: {}, using defaults", map_name);
+        radar_map_.pos_x = -2048;
+        radar_map_.pos_y = 2048;
+        radar_map_.scale = 4.0f;
+    }
+
+    // Load the radar image texture
+    int width, height, channels;
+    unsigned char* pixels = stbi_load(radar_image.string().c_str(), &width, &height, &channels, 4);
+    if (!pixels) {
+        LOG_ERROR("Failed to load radar image: {}", radar_image.string());
+        return false;
+    }
+
+    // Create OpenGL texture
+    GLuint texture_id;
+    glGenTextures(1, &texture_id);
+    glBindTexture(GL_TEXTURE_2D, texture_id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+    stbi_image_free(pixels);
+
+    radar_map_.texture_id = texture_id;
+    radar_map_.texture_width = width;
+    radar_map_.texture_height = height;
+    radar_map_.name = map_name;
+    radar_map_.loaded = true;
+
+    LOG_INFO("Radar map loaded: {} ({}x{})", map_name, width, height);
+    return true;
+}
+
+void Application::UnloadRadarMap() {
+    if (radar_map_.texture_id != 0) {
+        glDeleteTextures(1, &radar_map_.texture_id);
+        radar_map_.texture_id = 0;
+    }
+    radar_map_.loaded = false;
+    radar_map_.name.clear();
+}
+
+void Application::RefreshRadarData() {
+    if (!dma_ || !dma_->IsConnected() || selected_pid_ == 0) {
+        radar_players_.clear();
+        return;
+    }
+
+    // Check if CS2 entity system is initialized
+    if (!cs2_entity_initialized_ || cs2_entity_system_ == 0) {
+        radar_players_.clear();
+        return;
+    }
+
+    // Auto-detect current map from CS2 memory
+    if (radar_auto_detect_map_ && radar_map_name_addr_ != 0) {
+        // Read map name string pointer
+        auto map_ptr_data = dma_->ReadMemory(selected_pid_, radar_map_name_addr_, 8);
+        if (map_ptr_data.size() >= 8) {
+            uint64_t map_str_ptr;
+            std::memcpy(&map_str_ptr, map_ptr_data.data(), 8);
+            if (map_str_ptr != 0) {
+                auto map_name_data = dma_->ReadMemory(selected_pid_, map_str_ptr, 64);
+                if (!map_name_data.empty()) {
+                    std::string full_path(reinterpret_cast<char*>(map_name_data.data()));
+                    // Extract map name from path like "maps/de_dust2"
+                    size_t slash_pos = full_path.rfind('/');
+                    std::string map_name = (slash_pos != std::string::npos)
+                        ? full_path.substr(slash_pos + 1)
+                        : full_path;
+
+                    // Remove any file extension
+                    size_t dot_pos = map_name.rfind('.');
+                    if (dot_pos != std::string::npos) {
+                        map_name = map_name.substr(0, dot_pos);
+                    }
+
+                    // Only update if map changed
+                    if (!map_name.empty() && map_name != radar_detected_map_) {
+                        radar_detected_map_ = map_name;
+                        LOG_INFO("Detected map: {}", map_name);
+
+                        // Auto-load the map if it's different from current
+                        if (radar_current_map_ != map_name) {
+                            radar_current_map_ = map_name;
+                            if (!LoadRadarMap(map_name)) {
+                                LOG_WARN("No radar image for map: {}", map_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    radar_players_.clear();
+
+    // Verified offsets from HandleCS2ListPlayers
+    constexpr uint32_t OFFSET_PLAYER_NAME = 0x6E8;
+    constexpr uint32_t OFFSET_TEAM_NUM = 0x3EB;
+    constexpr uint32_t OFFSET_PAWN_HANDLE = 0x8FC;
+    constexpr uint32_t OFFSET_PAWN_IS_ALIVE = 0x904;
+    constexpr uint32_t OFFSET_PAWN_HEALTH = 0x908;
+    constexpr uint32_t OFFSET_CONNECTED = 0x6E4;
+    constexpr uint32_t OFFSET_IS_LOCAL = 0x778;
+    constexpr uint32_t OFFSET_SCENE_NODE = 0x330;
+    constexpr uint32_t OFFSET_ABS_ORIGIN = 0xD0;
+    constexpr uint32_t OFFSET_SPOTTED_STATE = 0x2700;
+    constexpr uint32_t OFFSET_SPOTTED = 0x08;
+
+    // Read chunk 0 pointer
+    auto chunk0_data = dma_->ReadMemory(selected_pid_, cs2_entity_system_ + 0x10, 8);
+    if (chunk0_data.size() < 8) return;
+
+    uint64_t chunk0_ptr;
+    std::memcpy(&chunk0_ptr, chunk0_data.data(), 8);
+    uint64_t chunk0_base = chunk0_ptr & ~0xFULL;
+    if (chunk0_base == 0) return;
+
+    // Iterate player controller indices 1-64
+    for (int idx = 1; idx <= 64; idx++) {
+        uint64_t entry_addr = chunk0_base + 0x08 + idx * 0x70;
+        auto controller_data = dma_->ReadMemory(selected_pid_, entry_addr, 8);
+        if (controller_data.size() < 8) continue;
+
+        uint64_t controller;
+        std::memcpy(&controller, controller_data.data(), 8);
+        if (controller == 0 || controller < 0x10000000000ULL) continue;
+
+        // Read connection state
+        auto connected_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_CONNECTED, 4);
+        if (connected_data.size() < 4) continue;
+        uint32_t connected;
+        std::memcpy(&connected, connected_data.data(), 4);
+        if (connected > 2) continue;  // Skip disconnected
+
+        // Read player name
+        auto name_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PLAYER_NAME, 64);
+        if (name_data.empty()) continue;
+        std::string name(reinterpret_cast<char*>(name_data.data()));
+        if (name.empty()) continue;
+
+        RadarPlayer player;
+        player.name = name;
+
+        // Read team
+        auto team_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_TEAM_NUM, 1);
+        if (!team_data.empty()) player.team = team_data[0];
+
+        // Read alive status and health
+        auto alive_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PAWN_IS_ALIVE, 1);
+        if (!alive_data.empty()) player.is_alive = alive_data[0] != 0;
+
+        auto health_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PAWN_HEALTH, 4);
+        if (health_data.size() >= 4) {
+            std::memcpy(&player.health, health_data.data(), 4);
+        }
+
+        // Read is local
+        auto local_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_IS_LOCAL, 1);
+        if (!local_data.empty()) player.is_local = local_data[0] != 0;
+
+        // Read position from pawn if alive
+        if (player.is_alive) {
+            auto pawn_handle_data = dma_->ReadMemory(selected_pid_, controller + OFFSET_PAWN_HANDLE, 4);
+            if (pawn_handle_data.size() >= 4) {
+                uint32_t pawn_handle;
+                std::memcpy(&pawn_handle, pawn_handle_data.data(), 4);
+                int pawn_index = pawn_handle & 0x7FFF;
+
+                // Resolve pawn from entity list
+                int chunk_idx = pawn_index / 512;
+                int slot = pawn_index % 512;
+
+                auto pawn_chunk_data = dma_->ReadMemory(selected_pid_,
+                    cs2_entity_system_ + 0x10 + chunk_idx * 8, 8);
+                if (pawn_chunk_data.size() >= 8) {
+                    uint64_t pawn_chunk;
+                    std::memcpy(&pawn_chunk, pawn_chunk_data.data(), 8);
+                    pawn_chunk &= ~0xFULL;
+
+                    if (pawn_chunk != 0) {
+                        auto pawn_data = dma_->ReadMemory(selected_pid_,
+                            pawn_chunk + 0x08 + slot * 0x70, 8);
+                        if (pawn_data.size() >= 8) {
+                            uint64_t pawn;
+                            std::memcpy(&pawn, pawn_data.data(), 8);
+
+                            if (pawn != 0) {
+                                // Read scene node
+                                auto scene_node_data = dma_->ReadMemory(selected_pid_,
+                                    pawn + OFFSET_SCENE_NODE, 8);
+                                if (scene_node_data.size() >= 8) {
+                                    uint64_t scene_node;
+                                    std::memcpy(&scene_node, scene_node_data.data(), 8);
+
+                                    if (scene_node != 0) {
+                                        // Read position
+                                        auto pos_data = dma_->ReadMemory(selected_pid_,
+                                            scene_node + OFFSET_ABS_ORIGIN, 12);
+                                        if (pos_data.size() >= 12) {
+                                            std::memcpy(&player.x, pos_data.data(), 4);
+                                            std::memcpy(&player.y, pos_data.data() + 4, 4);
+                                            std::memcpy(&player.z, pos_data.data() + 8, 4);
+                                        }
+                                    }
+                                }
+
+                                // Read spotted state
+                                auto spotted_data = dma_->ReadMemory(selected_pid_,
+                                    pawn + OFFSET_SPOTTED_STATE + OFFSET_SPOTTED, 1);
+                                if (!spotted_data.empty()) {
+                                    player.is_spotted = spotted_data[0] != 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        radar_players_.push_back(player);
+    }
+}
+
+ImVec2 Application::WorldToRadar(float world_x, float world_y,
+                                  const ImVec2& canvas_pos, const ImVec2& canvas_size) {
+    if (!radar_map_.loaded || radar_map_.scale == 0) {
+        return ImVec2(0, 0);
+    }
+
+    // Transform world coordinates to radar image coordinates
+    // radar_x = (world_x - pos_x) / scale
+    // radar_y = (pos_y - world_y) / scale  (Y is inverted)
+    float radar_x = (world_x - radar_map_.pos_x) / radar_map_.scale;
+    float radar_y = (radar_map_.pos_y - world_y) / radar_map_.scale;
+
+    // Normalize to 0-1 based on image dimensions
+    float norm_x = radar_x / radar_map_.texture_width;
+    float norm_y = radar_y / radar_map_.texture_height;
+
+    // Apply zoom and scroll, then map to canvas
+    float final_x = canvas_pos.x + radar_scroll_x_ + norm_x * canvas_size.x * radar_zoom_;
+    float final_y = canvas_pos.y + radar_scroll_y_ + norm_y * canvas_size.y * radar_zoom_;
+
+    return ImVec2(final_x, final_y);
+}
+
+void Application::RenderCS2Radar() {
+    ImGui::SetNextWindowSize(ImVec2(500, 500), ImGuiCond_FirstUseEver);
+    ImGui::Begin("CS2 Radar", &panels_.cs2_radar);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No process selected");
+        ImGui::End();
+        return;
+    }
+
+    // Toolbar - Row 1: Map selection
+    ImGui::Text("Map:");
+    ImGui::SameLine();
+
+    // Auto-detect checkbox
+    ImGui::Checkbox("Auto", &radar_auto_detect_map_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Auto-detect current map from CS2 memory");
+    }
+    ImGui::SameLine();
+
+    // Manual dropdown (disabled when auto-detect is on)
+    static const char* maps[] = { "de_dust2", "de_mirage", "de_inferno", "de_nuke",
+                                   "de_overpass", "de_ancient", "de_anubis", "de_vertigo",
+                                   "cs_office", "ar_shoots" };
+
+    // Find current map index for dropdown
+    int current_map_idx = 0;
+    for (int i = 0; i < IM_ARRAYSIZE(maps); i++) {
+        if (radar_current_map_ == maps[i]) {
+            current_map_idx = i;
+            break;
+        }
+    }
+
+    ImGui::BeginDisabled(radar_auto_detect_map_);
+    ImGui::SetNextItemWidth(110);
+    if (ImGui::Combo("##map", &current_map_idx, maps, IM_ARRAYSIZE(maps))) {
+        radar_current_map_ = maps[current_map_idx];
+        LoadRadarMap(maps[current_map_idx]);
+    }
+    ImGui::EndDisabled();
+
+    // Show detected map if auto-detect is on and map is detected
+    if (radar_auto_detect_map_ && !radar_detected_map_.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "(%s)", radar_detected_map_.c_str());
+    }
+
+    // Row 2: Options
+    ImGui::Checkbox("Center on local", &radar_center_on_local_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Names", &radar_show_names_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-refresh", &radar_auto_refresh_);
+
+    ImGui::SameLine();
+    ImGui::Text("Zoom:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    ImGui::SliderFloat("##radar_zoom", &radar_zoom_, 0.5f, 3.0f, "%.1fx");
+
+    // Auto-refresh timer
+    if (radar_auto_refresh_) {
+        radar_refresh_timer_ += ImGui::GetIO().DeltaTime;
+        if (radar_refresh_timer_ >= radar_refresh_interval_) {
+            RefreshRadarData();
+            radar_refresh_timer_ = 0.0f;
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        RefreshRadarData();
+    }
+
+    ImGui::Separator();
+
+    // Radar canvas
+    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
+    ImVec2 canvas_size = ImGui::GetContentRegionAvail();
+
+    // Make it square
+    float min_dim = std::min(canvas_size.x, canvas_size.y);
+    canvas_size = ImVec2(min_dim, min_dim);
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    // Background
+    draw_list->AddRectFilled(canvas_pos,
+        ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+        IM_COL32(20, 25, 30, 255));
+
+    // Draw map image if loaded
+    if (radar_map_.loaded && radar_map_.texture_id != 0) {
+        // Calculate image bounds with zoom and scroll
+        float img_w = canvas_size.x * radar_zoom_;
+        float img_h = canvas_size.y * radar_zoom_;
+
+        ImVec2 img_min(canvas_pos.x + radar_scroll_x_, canvas_pos.y + radar_scroll_y_);
+        ImVec2 img_max(img_min.x + img_w, img_min.y + img_h);
+
+        // Clip to canvas
+        draw_list->PushClipRect(canvas_pos,
+            ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), true);
+
+        // Draw the map image
+        draw_list->AddImage(
+            (ImTextureID)(intptr_t)radar_map_.texture_id,
+            img_min, img_max,
+            ImVec2(0, 0), ImVec2(1, 1),
+            IM_COL32(255, 255, 255, 200)
+        );
+
+        // Center on local player if enabled
+        if (radar_center_on_local_ && !radar_players_.empty()) {
+            for (const auto& player : radar_players_) {
+                if (player.is_local && player.is_alive) {
+                    // Calculate where local player would be on the image
+                    float radar_x = (player.x - radar_map_.pos_x) / radar_map_.scale;
+                    float radar_y = (radar_map_.pos_y - player.y) / radar_map_.scale;
+                    float norm_x = radar_x / radar_map_.texture_width;
+                    float norm_y = radar_y / radar_map_.texture_height;
+
+                    // Center the view
+                    radar_scroll_x_ = canvas_size.x / 2 - norm_x * img_w;
+                    radar_scroll_y_ = canvas_size.y / 2 - norm_y * img_h;
+                    break;
+                }
+            }
+        }
+
+        // Draw players
+        for (const auto& player : radar_players_) {
+            if (!player.is_alive) continue;
+
+            ImVec2 pos = WorldToRadar(player.x, player.y, canvas_pos, canvas_size);
+
+            // Skip if outside canvas
+            if (pos.x < canvas_pos.x || pos.x > canvas_pos.x + canvas_size.x ||
+                pos.y < canvas_pos.y || pos.y > canvas_pos.y + canvas_size.y) {
+                continue;
+            }
+
+            // Choose color based on team
+            ImU32 color;
+            if (player.is_local) {
+                color = IM_COL32(50, 200, 50, 255);  // Green for local
+            } else if (player.team == 2) {
+                color = IM_COL32(220, 150, 50, 255);  // Orange/yellow for T
+            } else if (player.team == 3) {
+                color = IM_COL32(80, 150, 220, 255);  // Blue for CT
+            } else {
+                color = IM_COL32(150, 150, 150, 255);  // Gray for unknown
+            }
+
+            // Draw player dot
+            float radius = player.is_local ? 8.0f : 6.0f;
+            draw_list->AddCircleFilled(pos, radius * radar_zoom_, color);
+            draw_list->AddCircle(pos, radius * radar_zoom_, IM_COL32(255, 255, 255, 150), 12, 1.5f);
+
+            // Draw name
+            if (radar_show_names_) {
+                ImVec2 text_pos(pos.x + 10, pos.y - 6);
+                draw_list->AddText(text_pos, IM_COL32(255, 255, 255, 200), player.name.c_str());
+            }
+        }
+
+        draw_list->PopClipRect();
+    } else {
+        // No map loaded - show placeholder
+        const char* hint = "Select a map from the dropdown";
+        ImVec2 text_size = ImGui::CalcTextSize(hint);
+        draw_list->AddText(
+            ImVec2(canvas_pos.x + (canvas_size.x - text_size.x) / 2,
+                   canvas_pos.y + (canvas_size.y - text_size.y) / 2),
+            IM_COL32(100, 100, 100, 200), hint
+        );
+
+        // Still draw players without map background
+        draw_list->PushClipRect(canvas_pos,
+            ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), true);
+
+        for (const auto& player : radar_players_) {
+            if (!player.is_alive) continue;
+
+            // Simple mapping without map info (just use raw coordinates scaled)
+            float norm_x = (player.x + 4096) / 8192.0f;  // Rough estimate
+            float norm_y = (4096 - player.y) / 8192.0f;
+            ImVec2 pos(canvas_pos.x + norm_x * canvas_size.x,
+                       canvas_pos.y + norm_y * canvas_size.y);
+
+            ImU32 color = player.is_local ? IM_COL32(50, 200, 50, 255) :
+                          (player.team == 2 ? IM_COL32(220, 150, 50, 255) :
+                                              IM_COL32(80, 150, 220, 255));
+            draw_list->AddCircleFilled(pos, 6.0f, color);
+
+            if (radar_show_names_) {
+                draw_list->AddText(ImVec2(pos.x + 10, pos.y - 6),
+                                  IM_COL32(255, 255, 255, 200), player.name.c_str());
+            }
+        }
+
+        draw_list->PopClipRect();
+    }
+
+    // Handle mouse input for panning
+    ImGui::InvisibleButton("radar_canvas", canvas_size);
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        radar_center_on_local_ = false;  // Disable centering when user pans
+        ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+        radar_scroll_x_ += delta.x;
+        radar_scroll_y_ += delta.y;
+        ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+    }
+
+    // Handle zoom with scroll wheel
+    if (ImGui::IsItemHovered()) {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0) {
+            radar_center_on_local_ = false;
+            float old_zoom = radar_zoom_;
+            radar_zoom_ += wheel * 0.2f;
+            radar_zoom_ = std::clamp(radar_zoom_, 0.5f, 3.0f);
+
+            // Zoom towards mouse position
+            ImVec2 mouse_pos = ImGui::GetMousePos();
+            ImVec2 mouse_canvas(mouse_pos.x - canvas_pos.x - radar_scroll_x_,
+                                mouse_pos.y - canvas_pos.y - radar_scroll_y_);
+            float zoom_factor = radar_zoom_ / old_zoom;
+            radar_scroll_x_ -= mouse_canvas.x * (zoom_factor - 1.0f);
+            radar_scroll_y_ -= mouse_canvas.y * (zoom_factor - 1.0f);
+        }
+    }
+
+    // Border
+    draw_list->AddRect(canvas_pos,
+        ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+        IM_COL32(60, 65, 75, 255));
+
+    // Player count
+    int alive_count = 0;
+    for (const auto& p : radar_players_) if (p.is_alive) alive_count++;
+    ImGui::Text("Players: %zu (%d alive)", radar_players_.size(), alive_count);
+
+    ImGui::End();
+}
+
+// ============================================================================
+// CS2 Player Dashboard
+// ============================================================================
+
+void Application::RenderCS2Dashboard() {
+    ImGui::SetNextWindowSize(ImVec2(450, 400), ImGuiCond_FirstUseEver);
+    ImGui::Begin("CS2 Dashboard", &panels_.cs2_dashboard);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No process selected");
+        ImGui::End();
+        return;
+    }
+
+    // Refresh data if empty or using radar's data
+    if (radar_players_.empty()) {
+        RefreshRadarData();
+    }
+
+    // Toolbar
+    ImGui::Checkbox("Show all players", &dashboard_show_all_players_);
+    ImGui::SameLine();
+    ImGui::Checkbox("Show bots", &dashboard_show_bots_);
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        RefreshRadarData();
+    }
+
+    ImGui::Separator();
+
+    // Split into two teams
+    std::vector<const RadarPlayer*> team_t, team_ct, spectators;
+    const RadarPlayer* local_player = nullptr;
+
+    for (const auto& player : radar_players_) {
+        if (player.is_local) local_player = &player;
+        if (player.team == 2) team_t.push_back(&player);
+        else if (player.team == 3) team_ct.push_back(&player);
+        else spectators.push_back(&player);
+    }
+
+    // Local player info box
+    if (local_player) {
+        ImGui::BeginChild("local_player", ImVec2(0, 80), true);
+
+        // Name and team
+        ImVec4 team_color = local_player->team == 2 ?
+            ImVec4(0.9f, 0.6f, 0.2f, 1.0f) : ImVec4(0.3f, 0.6f, 0.9f, 1.0f);
+        ImGui::TextColored(team_color, "%s", local_player->name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(You)");
+
+        // Health bar
+        float health_pct = local_player->health / 100.0f;
+        ImVec4 health_color = health_pct > 0.5f ? ImVec4(0.2f, 0.8f, 0.2f, 1.0f) :
+                              health_pct > 0.25f ? ImVec4(0.9f, 0.7f, 0.1f, 1.0f) :
+                                                   ImVec4(0.9f, 0.2f, 0.2f, 1.0f);
+
+        ImGui::Text("Health:");
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, health_color);
+        ImGui::ProgressBar(health_pct, ImVec2(150, 18),
+                          std::to_string(local_player->health).c_str());
+        ImGui::PopStyleColor();
+
+        // Position
+        ImGui::Text("Position: %.0f, %.0f, %.0f",
+                   local_player->x, local_player->y, local_player->z);
+
+        ImGui::EndChild();
+    }
+
+    // Team tables
+    float half_width = ImGui::GetContentRegionAvail().x / 2 - 5;
+
+    // Terrorists
+    ImGui::BeginChild("team_t", ImVec2(half_width, 0), true);
+    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "TERRORISTS (%zu)", team_t.size());
+    ImGui::Separator();
+
+    for (const auto* player : team_t) {
+        if (!dashboard_show_all_players_ && !player->is_alive) continue;
+
+        // Player row
+        ImGui::PushID(player->name.c_str());
+
+        // Alive indicator
+        if (player->is_alive) {
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "*");
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "X");
+        }
+        ImGui::SameLine();
+
+        // Name (highlight if local)
+        if (player->is_local) {
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", player->name.c_str());
+        } else {
+            ImGui::Text("%s", player->name.c_str());
+        }
+
+        // Health bar on same line
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+        float hp = player->health / 100.0f;
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram,
+            hp > 0.5f ? ImVec4(0.2f, 0.7f, 0.2f, 1.0f) :
+            hp > 0.25f ? ImVec4(0.8f, 0.6f, 0.1f, 1.0f) :
+                         ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::ProgressBar(hp, ImVec2(55, 14), "");
+        ImGui::PopStyleColor();
+
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // Counter-Terrorists
+    ImGui::BeginChild("team_ct", ImVec2(half_width, 0), true);
+    ImGui::TextColored(ImVec4(0.3f, 0.6f, 0.9f, 1.0f), "COUNTER-TERRORISTS (%zu)", team_ct.size());
+    ImGui::Separator();
+
+    for (const auto* player : team_ct) {
+        if (!dashboard_show_all_players_ && !player->is_alive) continue;
+
+        ImGui::PushID(player->name.c_str());
+
+        if (player->is_alive) {
+            ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "*");
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "X");
+        }
+        ImGui::SameLine();
+
+        if (player->is_local) {
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", player->name.c_str());
+        } else {
+            ImGui::Text("%s", player->name.c_str());
+        }
+
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+        float hp = player->health / 100.0f;
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram,
+            hp > 0.5f ? ImVec4(0.2f, 0.7f, 0.2f, 1.0f) :
+            hp > 0.25f ? ImVec4(0.8f, 0.6f, 0.1f, 1.0f) :
+                         ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::ProgressBar(hp, ImVec2(55, 14), "");
+        ImGui::PopStyleColor();
+
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
 
     ImGui::End();
 }
