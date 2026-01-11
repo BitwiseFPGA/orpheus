@@ -20,8 +20,105 @@
 #include <iomanip>
 #include <fstream>
 #include <filesystem>
+#include <regex>
+#include <functional>
 
 using json = nlohmann::json;
+
+namespace {
+
+// Post-process decompiler output for better readability
+// Converts raw addresses to module+offset format
+std::string PostProcessDecompilerOutput(
+    const std::string& c_code,
+    const std::vector<orpheus::ModuleInfo>& modules)
+{
+    std::string result = c_code;
+
+    // Helper to find module for address
+    auto find_module = [&modules](uint64_t addr) -> std::pair<std::string, uint64_t> {
+        for (const auto& mod : modules) {
+            if (addr >= mod.base_address && addr < mod.base_address + mod.size) {
+                return {mod.name, addr - mod.base_address};
+            }
+        }
+        return {"", 0};
+    };
+
+    // Helper to format hex
+    auto format_hex = [](uint64_t val) -> std::string {
+        std::ostringstream ss;
+        ss << "0x" << std::hex << val;
+        return ss.str();
+    };
+
+    // Helper to apply regex replacements
+    auto apply_regex = [](const std::string& input, const std::regex& re,
+                          std::function<std::string(const std::smatch&)> replacer) -> std::string {
+        std::string output;
+        std::sregex_iterator it(input.begin(), input.end(), re);
+        std::sregex_iterator end;
+        size_t last_pos = 0;
+
+        for (; it != end; ++it) {
+            output += input.substr(last_pos, it->position() - last_pos);
+            output += replacer(*it);
+            last_pos = it->position() + it->length();
+        }
+        output += input.substr(last_pos);
+        return output;
+    };
+
+    // 1. Fix function names: func_<decimal> -> func_<hex_with_context>
+    //    Pattern: func_(\d{10,}) - decimal addresses 10+ digits
+    std::regex func_decimal_re(R"(func_(\d{10,}))");
+    result = apply_regex(result, func_decimal_re, [&](const std::smatch& m) -> std::string {
+        uint64_t addr = std::stoull(m[1].str());
+        auto [mod_name, offset] = find_module(addr);
+
+        if (!mod_name.empty()) {
+            std::ostringstream ss;
+            ss << "func_" << mod_name << "_0x" << std::hex << offset;
+            return ss.str();
+        }
+        return "func_" + format_hex(addr);
+    });
+
+    // 2. Fix RAM references: iRam/pcRam/uRam followed by hex address
+    //    Pattern: ([ipcufb]Ram)([0-9a-fA-F]{8,16})
+    std::regex ram_re(R"(([ipcufb]Ram)([0-9a-fA-F]{8,16}))");
+    result = apply_regex(result, ram_re, [&](const std::smatch& m) -> std::string {
+        std::string prefix = m[1].str();
+        uint64_t addr = std::stoull(m[2].str(), nullptr, 16);
+        auto [mod_name, offset] = find_module(addr);
+
+        if (!mod_name.empty()) {
+            std::ostringstream ss;
+            ss << prefix << "_" << mod_name << "_0x" << std::hex << offset;
+            return ss.str();
+        }
+        return prefix + "_0x" + m[2].str();
+    });
+
+    // 3. Fix function calls: func_0x<hex>() -> func_<module>_0x<offset>()
+    //    Pattern: func_0x([0-9a-fA-F]{8,16})
+    std::regex func_hex_re(R"(func_0x([0-9a-fA-F]{8,16}))");
+    result = apply_regex(result, func_hex_re, [&](const std::smatch& m) -> std::string {
+        uint64_t addr = std::stoull(m[1].str(), nullptr, 16);
+        auto [mod_name, offset] = find_module(addr);
+
+        if (!mod_name.empty()) {
+            std::ostringstream ss;
+            ss << "func_" << mod_name << "_0x" << std::hex << offset;
+            return ss.str();
+        }
+        return m.str();
+    });
+
+    return result;
+}
+
+} // anonymous namespace
 
 namespace orpheus::mcp {
 
@@ -224,7 +321,21 @@ std::string MCPServer::HandleDecompile(const std::string& body) {
         }
 
         if (result.success) {
-            response["c_code"] = result.c_code;
+            // Post-process the decompiler output for better readability
+            // Get cached modules for address context resolution
+            std::vector<ModuleInfo> modules;
+            {
+                std::lock_guard<std::mutex> lock(modules_mutex_);
+                if (cached_modules_pid_ != pid) {
+                    cached_modules_ = dma->GetModuleList(pid);
+                    cached_modules_pid_ = pid;
+                }
+                modules = cached_modules_;
+            }
+
+            // Apply post-processing to convert addresses to module+offset format
+            std::string processed_code = PostProcessDecompilerOutput(result.c_code, modules);
+            response["c_code"] = processed_code;
             response["warnings"] = result.warnings;
         } else {
             response["error"] = result.error;
