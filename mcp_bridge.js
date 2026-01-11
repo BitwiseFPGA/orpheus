@@ -529,6 +529,22 @@ const MCP_TOOLS = [
     }
   },
   {
+    name: 'get_health',
+    description: 'Get Orpheus server health status and basic version info. Use this to verify the server is running and get version details.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    name: 'get_version',
+    description: 'Get detailed Orpheus version information including git hash, branch, build date, platform, and compiler info.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
     name: 'get_processes',
     description: 'List all running processes visible to DMA. Returns array of process info with PID, name, and base address.',
     inputSchema: {
@@ -1546,6 +1562,8 @@ const MCP_TOOLS = [
  * Map MCP tool names to HTTP endpoints
  */
 const TOOL_ENDPOINT_MAP = {
+  'get_health': { method: 'GET', path: '/health' },
+  'get_version': { method: 'GET', path: '/version' },
   'read_memory': { method: 'POST', path: '/tools/read_memory' },
   'scan_pattern': { method: 'POST', path: '/tools/scan_pattern' },
   'scan_pattern_async': { method: 'POST', path: '/tools/scan_pattern_async' },
