@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <mutex>
 
 #ifdef PLATFORM_WINDOWS
     #include <windows.h>
@@ -244,6 +245,7 @@ static FN_ConfigGet fn_ConfigGet = nullptr;
 static FN_VfsReadU fn_VfsReadU = nullptr;
 
 static void* vmm_module = nullptr;
+static std::once_flag vmm_init_flag;
 
 template<typename T>
 static T LoadFunction(const char* name) {
@@ -307,6 +309,30 @@ DMAInterface& DMAInterface::operator=(DMAInterface&& other) noexcept {
     return *this;
 }
 
+// Thread-safe VMM module initialization
+static bool InitializeVMMModule(RuntimeManager& runtime, std::string& error_out) {
+    static bool init_result = false;
+    static std::string init_error;
+
+    std::call_once(vmm_init_flag, [&runtime]() {
+        vmm_module = runtime.LoadExtractedDLL(VMM_LIBRARY_NAME);
+        if (vmm_module == nullptr) {
+            init_error = "Failed to load " VMM_LIBRARY_NAME;
+            init_result = false;
+            return;
+        }
+        if (!LoadVMMFunctions()) {
+            init_error = "Failed to load VMM functions";
+            init_result = false;
+            return;
+        }
+        init_result = true;
+    });
+
+    error_out = init_error;
+    return init_result;
+}
+
 bool DMAInterface::Initialize(const std::string& device) {
     if (vmm_handle_ != nullptr) return true;
 
@@ -316,16 +342,11 @@ bool DMAInterface::Initialize(const std::string& device) {
         return false;
     }
 
-    if (vmm_module == nullptr) {
-        vmm_module = runtime.LoadExtractedDLL(VMM_LIBRARY_NAME);
-        if (vmm_module == nullptr) {
-            ReportError("Failed to load " VMM_LIBRARY_NAME);
-            return false;
-        }
-        if (!LoadVMMFunctions()) {
-            ReportError("Failed to load VMM functions");
-            return false;
-        }
+    // Thread-safe module initialization
+    std::string vmm_error;
+    if (!InitializeVMMModule(runtime, vmm_error)) {
+        ReportError(vmm_error);
+        return false;
     }
 
     std::vector<const char*> argv;

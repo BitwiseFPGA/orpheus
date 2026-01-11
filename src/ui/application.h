@@ -24,12 +24,16 @@ namespace analysis {
     class Disassembler;
     class MemoryWatcher;
     class RTTIParser;
+    class CFGBuilder;
     struct InstructionInfo;
     struct StringMatch;
     struct PatternMatch;
     struct WatchRegion;
     struct MemoryChange;
     struct RTTIClassInfo;
+    struct ControlFlowGraph;
+    struct CFGNode;
+    struct CFGEdge;
 }
 
 namespace mcp {
@@ -98,6 +102,7 @@ struct PanelState {
     bool cs2_schema = false;  // CS2-specific schema dumper
     bool cs2_entity_inspector = false;  // CS2 entity inspector (RTTI + Schema)
     bool decompiler = true;  // Ghidra decompiler view (shown by default)
+    bool cfg_viewer = false;  // Control Flow Graph visualization
 };
 
 /**
@@ -162,6 +167,7 @@ private:
     void RenderCS2Schema();
     void RenderCS2EntityInspector();
     void RenderDecompiler();
+    void RenderCFGViewer();
 
     // Dialogs
     void RenderCommandPalette();
@@ -241,6 +247,17 @@ private:
     char decompile_address_input_[32] = {};
     bool decompiler_initialized_ = false;
 #endif
+
+    // CFG Viewer state
+    std::unique_ptr<analysis::ControlFlowGraph> cfg_;
+    std::unique_ptr<analysis::CFGBuilder> cfg_builder_;
+    uint64_t cfg_function_addr_ = 0;
+    char cfg_address_input_[32] = {};
+    uint64_t cfg_selected_node_ = 0;
+    float cfg_scroll_x_ = 0.0f;
+    float cfg_scroll_y_ = 0.0f;
+    float cfg_zoom_ = 1.0f;
+    bool cfg_needs_layout_ = false;
 
     // Panel visibility
     PanelState panels_;

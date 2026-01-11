@@ -7,6 +7,7 @@
 #include <functional>
 #include <vector>
 #include <map>
+#include <mutex>
 #include "../utils/cache_manager.h"
 
 namespace orpheus {
@@ -122,7 +123,9 @@ private:
     std::string HandleReadMemory(const std::string& body);
     std::string HandleWriteMemory(const std::string& body);
     std::string HandleScanPattern(const std::string& body);
+    std::string HandleScanPatternAsync(const std::string& body);
     std::string HandleScanStrings(const std::string& body);
+    std::string HandleScanStringsAsync(const std::string& body);
     std::string HandleDumpModule(const std::string& body);
     std::string HandleDisassemble(const std::string& body);
     std::string HandleDecompile(const std::string& body);
@@ -182,6 +185,24 @@ private:
     std::string HandleCS2ListPlayers(const std::string& body);
     std::string HandleCS2GetGameState(const std::string& body);
 
+    // Function recovery endpoints
+    std::string HandleRecoverFunctions(const std::string& body);
+    std::string HandleGetFunctionAt(const std::string& body);
+    std::string HandleGetFunctionContaining(const std::string& body);
+
+    // CFG analysis endpoints
+    std::string HandleBuildCFG(const std::string& body);
+    std::string HandleGetCFGNode(const std::string& body);
+
+    // Expression evaluation
+    std::string HandleEvaluateExpression(const std::string& body);
+
+    // Task management endpoints
+    std::string HandleTaskStatus(const std::string& body);
+    std::string HandleTaskCancel(const std::string& body);
+    std::string HandleTaskList(const std::string& body);
+    std::string HandleTaskCleanup(const std::string& body);
+
     // Utility
     std::string CreateErrorResponse(const std::string& error);
     std::string CreateSuccessResponse(const std::string& data);
@@ -198,6 +219,8 @@ private:
     std::string FormatAddressWithContext(uint32_t pid, uint64_t address);
 
     // Cached modules for context resolution
+    // Protected by modules_mutex_ for thread-safe access from HTTP handlers
+    mutable std::mutex modules_mutex_;
     std::vector<orpheus::ModuleInfo> cached_modules_;
     uint32_t cached_modules_pid_ = 0;
 
@@ -214,8 +237,11 @@ private:
     uint32_t emulator_pid_ = 0;  // PID the emulator is attached to
 
     // Cache managers (unified cache system)
+    // Protected by cache_mutex_ for thread-safe access from HTTP handlers
+    mutable std::mutex cache_mutex_;
     utils::CacheManager rtti_cache_{"rtti", "RTTI"};
     utils::CacheManager cs2_schema_cache_{"cs2_schema", "CS2 schema"};
+    utils::CacheManager function_cache_{"functions", "Function recovery"};
 
     // CS2 Schema instance (lazy-initialized)
     void* cs2_schema_ = nullptr;  // dumper::CS2SchemaDumper* (opaque)

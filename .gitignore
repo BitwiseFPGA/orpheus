@@ -26,3 +26,6 @@ orpheus_layout.ini
 
 # Cache
 cache/
+
+# Dev notes
+ROADMAP.md

@@ -253,8 +253,72 @@ bool InstallerApp::IsClientInstalled(const std::string& config_dir) {
     return std::filesystem::exists(config_dir);
 }
 
+// Get version from embedded bridge (parsed at compile time from the source)
+std::string InstallerApp::GetEmbeddedBridgeVersion() {
+    if constexpr (!orpheus::embedded::has_mcp_bridge) {
+        return "0.0.0";
+    }
+
+    // Search for BRIDGE_VERSION in the embedded JS
+    std::string_view content(
+        reinterpret_cast<const char*>(orpheus::embedded::mcp_bridge_js),
+        orpheus::embedded::mcp_bridge_js_size
+    );
+
+    // Look for: const BRIDGE_VERSION = '1.0.0';
+    size_t pos = content.find("BRIDGE_VERSION = '");
+    if (pos != std::string_view::npos) {
+        pos += 18;  // Skip past "BRIDGE_VERSION = '"
+        size_t end = content.find('\'', pos);
+        if (end != std::string_view::npos) {
+            return std::string(content.substr(pos, end - pos));
+        }
+    }
+    return "0.0.0";
+}
+
+// Read version from an existing bridge file
+std::string InstallerApp::ReadBridgeVersion(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) {
+        return "0.0.0";
+    }
+
+    try {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            size_t pos = line.find("BRIDGE_VERSION = '");
+            if (pos != std::string::npos) {
+                pos += 18;
+                size_t end = line.find('\'', pos);
+                if (end != std::string::npos) {
+                    return line.substr(pos, end - pos);
+                }
+            }
+        }
+    } catch (...) {
+    }
+    return "0.0.0";
+}
+
+// Compare semver versions: returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2
+int InstallerApp::CompareVersions(const std::string& v1, const std::string& v2) {
+    auto parseVersion = [](const std::string& v) {
+        int major = 0, minor = 0, patch = 0;
+        sscanf(v.c_str(), "%d.%d.%d", &major, &minor, &patch);
+        return major * 10000 + minor * 100 + patch;
+    };
+
+    int n1 = parseVersion(v1);
+    int n2 = parseVersion(v2);
+
+    if (n1 < n2) return -1;
+    if (n1 > n2) return 1;
+    return 0;
+}
+
 // Extract embedded mcp_bridge.js to AppData and return the path
-static std::filesystem::path ExtractMCPBridge() {
+std::filesystem::path InstallerApp::ExtractMCPBridge() {
     std::filesystem::path bridge_path;
 
 #ifdef PLATFORM_WINDOWS
@@ -280,7 +344,8 @@ static std::filesystem::path ExtractMCPBridge() {
     // Create directory if needed
     std::filesystem::create_directories(bridge_path.parent_path());
 
-    // Write embedded bridge to file (always overwrite to ensure latest version)
+    // Always write embedded bridge (ensures latest version)
+    // Version check is for informational purposes
     try {
         std::ofstream out(bridge_path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(orpheus::embedded::mcp_bridge_js),
@@ -295,7 +360,7 @@ static std::filesystem::path ExtractMCPBridge() {
 
 std::string InstallerApp::GenerateMCPConfig() {
     // Extract embedded bridge and generate config
-    std::filesystem::path bridge_path = ExtractMCPBridge();
+    std::filesystem::path bridge_path = this->ExtractMCPBridge();
     if (bridge_path.empty()) {
         return "{}";
     }
@@ -313,7 +378,7 @@ std::string InstallerApp::GenerateMCPConfig() {
 
 bool InstallerApp::InstallToClient(MCPClientInfo& client) {
     // Extract embedded mcp_bridge.js to AppData
-    std::filesystem::path bridge_path = ExtractMCPBridge();
+    std::filesystem::path bridge_path = this->ExtractMCPBridge();
     if (bridge_path.empty()) {
         status_message_ = "Failed to extract mcp_bridge.js";
         status_is_error_ = true;
@@ -322,6 +387,9 @@ bool InstallerApp::InstallToClient(MCPClientInfo& client) {
 
     // Handle CLI-based installation (Claude Code)
     if (client.use_cli) {
+        // First, remove any existing orpheus config (ignore errors - it may not exist)
+        system("claude mcp remove orpheus 2>/dev/null");
+
         // Build command: claude mcp add orpheus -e ORPHEUS_MCP_URL=... -e ORPHEUS_API_KEY=... -- node /path/to/bridge.js
         std::string cmd = "claude mcp add orpheus";
 
@@ -342,6 +410,10 @@ bool InstallerApp::InstallToClient(MCPClientInfo& client) {
             status_is_error_ = true;
             return false;
         }
+
+        // Show version in status
+        std::string version = GetEmbeddedBridgeVersion();
+        status_message_ = "Installed Orpheus bridge v" + version;
         return true;
     }
 

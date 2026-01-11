@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <filesystem>
 
 struct GLFWwindow;
 struct ImFont;
@@ -52,6 +53,12 @@ private:
     // Installation
     bool InstallToClient(MCPClientInfo& client);
     std::string GenerateMCPConfig();
+
+    // Bridge versioning
+    std::filesystem::path ExtractMCPBridge();
+    static std::string GetEmbeddedBridgeVersion();
+    static std::string ReadBridgeVersion(const std::filesystem::path& path);
+    static int CompareVersions(const std::string& v1, const std::string& v2);
 
     // GUI rendering
     void RenderFrame();

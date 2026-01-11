@@ -5,6 +5,9 @@
  * stdio-to-HTTP adapter for Model Context Protocol (JSON-RPC 2.0)
  */
 
+// Bridge version - increment when tools or functionality changes
+const BRIDGE_VERSION = '1.2.0';
+
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
@@ -234,8 +237,62 @@ const MCP_TOOLS = [
     }
   },
   {
+    name: 'scan_pattern_async',
+    description: 'Async version of scan_pattern. Returns a task_id immediately. Use task_status to check progress and get results. Supports cancellation via task_cancel.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID to scan'
+        },
+        base: {
+          type: 'string',
+          description: 'Base address to start scanning from (hex)'
+        },
+        size: {
+          type: 'integer',
+          description: 'Size of memory region to scan in bytes'
+        },
+        pattern: {
+          type: 'string',
+          description: 'IDA-style pattern (e.g., "48 8B ?? 74 ?? ?? ?? ??") where ?? = wildcard'
+        }
+      },
+      required: ['pid', 'base', 'size', 'pattern']
+    }
+  },
+  {
     name: 'scan_strings',
     description: 'Scan for ASCII/Unicode strings in process memory. Returns array of found strings with addresses.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID to scan'
+        },
+        base: {
+          type: 'string',
+          description: 'Base address to start scanning from (hex)'
+        },
+        size: {
+          type: 'integer',
+          description: 'Size of memory region to scan in bytes'
+        },
+        min_length: {
+          type: 'integer',
+          description: 'Minimum string length to match',
+          default: 4,
+          minimum: 1
+        }
+      },
+      required: ['pid', 'base', 'size']
+    }
+  },
+  {
+    name: 'scan_strings_async',
+    description: 'Async version of scan_strings. Returns a task_id immediately. Use task_status to check progress and get results. Supports cancellation via task_cancel.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1115,6 +1172,215 @@ const MCP_TOOLS = [
       },
       required: ['pid']
     }
+  },
+  // ============================================================================
+  // Function Recovery Tools
+  // ============================================================================
+  {
+    name: 'recover_functions',
+    description: 'Recover functions from a module using prologue detection, call target following, and exception data (.pdata). Returns function count and summary. Results are cached for fast subsequent queries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        module_base: {
+          type: 'string',
+          description: 'Base address of the module to analyze (hex)'
+        },
+        force_rescan: {
+          type: 'boolean',
+          description: 'Force re-scan even if cache exists. Default: false',
+          default: false
+        },
+        use_prologues: {
+          type: 'boolean',
+          description: 'Scan for function prologues. Default: true',
+          default: true
+        },
+        follow_calls: {
+          type: 'boolean',
+          description: 'Mark CALL targets as functions. Default: true',
+          default: true
+        },
+        use_exception_data: {
+          type: 'boolean',
+          description: 'Parse .pdata exception directory (x64 PE). Default: true',
+          default: true
+        },
+        max_functions: {
+          type: 'integer',
+          description: 'Maximum number of functions to recover. Default: 100000',
+          default: 100000
+        }
+      },
+      required: ['pid', 'module_base']
+    }
+  },
+  {
+    name: 'get_function_at',
+    description: 'Get function information at an exact address. Requires recover_functions to be called first for the module.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Address to look up (hex). Must be the exact function entry point.'
+        }
+      },
+      required: ['pid', 'address']
+    }
+  },
+  {
+    name: 'get_function_containing',
+    description: 'Get the function that contains a given address. Useful for finding what function an instruction belongs to. Requires recover_functions to be called first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Address to look up (hex). Returns the function containing this address.'
+        }
+      },
+      required: ['pid', 'address']
+    }
+  },
+  // CFG Analysis tools
+  {
+    name: 'build_cfg',
+    description: 'Build a Control Flow Graph for a function. Returns nodes (basic blocks), edges, loop detection, and layout information for visualization. Use this to understand function structure and control flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Function entry point address (hex)'
+        },
+        max_size: {
+          type: 'integer',
+          description: 'Maximum bytes to analyze (default: 64KB, max: 1MB)'
+        },
+        compute_layout: {
+          type: 'boolean',
+          description: 'Compute x/y layout positions for visualization (default: true)'
+        }
+      },
+      required: ['pid', 'address']
+    }
+  },
+  {
+    name: 'get_cfg_node',
+    description: 'Get detailed information about a specific CFG node (basic block) including full disassembly and edge details.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        function_address: {
+          type: 'string',
+          description: 'Function entry point address (hex)'
+        },
+        node_address: {
+          type: 'string',
+          description: 'Address of the basic block to get details for (hex)'
+        }
+      },
+      required: ['pid', 'function_address', 'node_address']
+    }
+  },
+  // Expression evaluation
+  {
+    name: 'evaluate_expression',
+    description: 'Evaluate an address expression. Supports module names (client.dll), offsets (+0x1000), dereference ([addr]), arithmetic (+, -, *, /), and nested expressions. Examples: "client.dll+0x1234", "[client.dll+0x10]", "[[base]+0x20]+0x100".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID (required for module resolution and memory reads)'
+        },
+        expression: {
+          type: 'string',
+          description: 'Address expression to evaluate. Can use module names, hex offsets, dereference brackets, and arithmetic.'
+        }
+      },
+      required: ['pid', 'expression']
+    }
+  },
+  // Task management tools
+  {
+    name: 'task_status',
+    description: 'Get the status of a background task. Returns task state (pending, running, completed, failed, cancelled), progress (0.0-1.0), status message, and result if completed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: {
+          type: 'string',
+          description: 'Task ID returned from an async operation'
+        }
+      },
+      required: ['task_id']
+    }
+  },
+  {
+    name: 'task_cancel',
+    description: 'Cancel a running background task. Returns whether cancellation was successful.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: {
+          type: 'string',
+          description: 'Task ID to cancel'
+        }
+      },
+      required: ['task_id']
+    }
+  },
+  {
+    name: 'task_list',
+    description: 'List all background tasks. Optionally filter by state. Returns task summaries and counts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        state: {
+          type: 'string',
+          enum: ['pending', 'running', 'completed', 'failed', 'cancelled'],
+          description: 'Optional state filter'
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'task_cleanup',
+    description: 'Remove old completed/failed/cancelled tasks. Default removes tasks older than 5 minutes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        max_age_seconds: {
+          type: 'integer',
+          description: 'Maximum age in seconds for tasks to keep. Default: 300 (5 minutes)',
+          default: 300
+        }
+      },
+      required: []
+    }
   }
 ];
 
@@ -1128,7 +1394,9 @@ const MCP_TOOLS = [
 const TOOL_ENDPOINT_MAP = {
   'read_memory': { method: 'POST', path: '/tools/read_memory' },
   'scan_pattern': { method: 'POST', path: '/tools/scan_pattern' },
+  'scan_pattern_async': { method: 'POST', path: '/tools/scan_pattern_async' },
   'scan_strings': { method: 'POST', path: '/tools/scan_strings' },
+  'scan_strings_async': { method: 'POST', path: '/tools/scan_strings_async' },
   'disassemble': { method: 'POST', path: '/tools/disassemble' },
   'decompile': { method: 'POST', path: '/tools/decompile' },
   'get_processes': { method: 'GET', path: '/tools/processes' },
@@ -1177,7 +1445,21 @@ const TOOL_ENDPOINT_MAP = {
   'cs2_get_local_player': { method: 'POST', path: '/tools/cs2_get_local_player' },
   'cs2_get_entity': { method: 'POST', path: '/tools/cs2_get_entity' },
   'cs2_list_players': { method: 'POST', path: '/tools/cs2_list_players' },
-  'cs2_get_game_state': { method: 'POST', path: '/tools/cs2_get_game_state' }
+  'cs2_get_game_state': { method: 'POST', path: '/tools/cs2_get_game_state' },
+  // Function recovery tools
+  'recover_functions': { method: 'POST', path: '/tools/recover_functions' },
+  'get_function_at': { method: 'POST', path: '/tools/get_function_at' },
+  'get_function_containing': { method: 'POST', path: '/tools/get_function_containing' },
+  // CFG analysis tools
+  'build_cfg': { method: 'POST', path: '/tools/build_cfg' },
+  'get_cfg_node': { method: 'POST', path: '/tools/get_cfg_node' },
+  // Expression evaluation
+  'evaluate_expression': { method: 'POST', path: '/tools/evaluate_expression' },
+  // Task management tools
+  'task_status': { method: 'POST', path: '/tools/task_status' },
+  'task_cancel': { method: 'POST', path: '/tools/task_cancel' },
+  'task_list': { method: 'POST', path: '/tools/task_list' },
+  'task_cleanup': { method: 'POST', path: '/tools/task_cleanup' }
 };
 
 /**

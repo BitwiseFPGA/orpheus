@@ -7,6 +7,15 @@ namespace orpheus::analysis {
 
 std::optional<Pattern> PatternScanner::Compile(const std::string& pattern,
                                                 const std::string& name) {
+    // Prevent excessively long patterns (DoS protection)
+    // Max 1024 bytes = 2048 hex chars + spaces
+    static constexpr size_t MAX_PATTERN_INPUT = 4096;
+    static constexpr size_t MAX_PATTERN_BYTES = 1024;
+
+    if (pattern.length() > MAX_PATTERN_INPUT) {
+        return std::nullopt;
+    }
+
     Pattern result;
     result.name = name;
     result.original = pattern;
@@ -21,6 +30,11 @@ std::optional<Pattern> PatternScanner::Compile(const std::string& pattern,
     }
 
     if (cleaned.empty() || cleaned.length() % 2 != 0) {
+        return std::nullopt;
+    }
+
+    // Additional size check after cleaning
+    if (cleaned.length() / 2 > MAX_PATTERN_BYTES) {
         return std::nullopt;
     }
 

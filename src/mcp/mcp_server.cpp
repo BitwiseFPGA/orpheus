@@ -66,14 +66,17 @@ MCPServer::~MCPServer() {
 // ============================================================================
 
 std::string MCPServer::GenerateApiKey() {
+    // Use std::random_device directly for cryptographic randomness
+    // On Linux, this uses /dev/urandom. On Windows, it uses CryptGenRandom.
     std::random_device rd;
-    std::mt19937_64 gen(rd());
-    std::uniform_int_distribution<uint64_t> dist;
 
     std::stringstream ss;
     ss << "oph_";
-    for (int i = 0; i < 4; i++) {
-        ss << std::hex << std::setw(16) << std::setfill('0') << dist(gen);
+
+    // Generate 32 random bytes (256 bits) using random_device directly
+    // random_device returns 32-bit values, so we need 8 calls for 256 bits
+    for (int i = 0; i < 8; i++) {
+        ss << std::hex << std::setw(8) << std::setfill('0') << rd();
     }
 
     return ss.str();
@@ -189,6 +192,8 @@ std::string MCPServer::CreateSuccessResponse(const std::string& data) {
 MCPServer::AddressContext MCPServer::ResolveAddressContext(uint32_t pid, uint64_t address) {
     AddressContext ctx;
 
+    std::lock_guard<std::mutex> lock(modules_mutex_);
+
     // Refresh cache if needed
     if (cached_modules_pid_ != pid) {
         auto* dma = app_->GetDMA();
@@ -295,9 +300,11 @@ void MCPServer::SetupRoutes() {
     ROUTE_POST_PERM("/tools/write_memory", allow_write, "Write", HandleWriteMemory);
     ROUTE_POST_PERM("/tools/resolve_pointer", allow_read, "Read", HandleResolvePointerChain);
 
-    // Scan operations
+    // Scan operations (sync and async variants)
     ROUTE_POST_PERM("/tools/scan_pattern", allow_scan, "Scan", HandleScanPattern);
+    ROUTE_POST_PERM("/tools/scan_pattern_async", allow_scan, "Scan", HandleScanPatternAsync);
     ROUTE_POST_PERM("/tools/scan_strings", allow_scan, "Scan", HandleScanStrings);
+    ROUTE_POST_PERM("/tools/scan_strings_async", allow_scan, "Scan", HandleScanStringsAsync);
     ROUTE_POST_PERM("/tools/find_xrefs", allow_scan, "Scan", HandleFindXrefs);
 
     // Disassembly, decompile & dump
@@ -352,6 +359,24 @@ void MCPServer::SetupRoutes() {
     ROUTE_POST_PERM("/tools/cs2_get_entity", allow_cs2_schema, "CS2Entity", HandleCS2GetEntity);
     ROUTE_POST_PERM("/tools/cs2_list_players", allow_cs2_schema, "CS2Entity", HandleCS2ListPlayers);
     ROUTE_POST_PERM("/tools/cs2_get_game_state", allow_cs2_schema, "CS2Entity", HandleCS2GetGameState);
+
+    // Function recovery
+    ROUTE_POST_PERM("/tools/recover_functions", allow_disasm, "Analysis", HandleRecoverFunctions);
+    ROUTE_POST_PERM("/tools/get_function_at", allow_disasm, "Analysis", HandleGetFunctionAt);
+    ROUTE_POST_PERM("/tools/get_function_containing", allow_disasm, "Analysis", HandleGetFunctionContaining);
+
+    // CFG analysis
+    ROUTE_POST_PERM("/tools/build_cfg", allow_disasm, "Analysis", HandleBuildCFG);
+    ROUTE_POST_PERM("/tools/get_cfg_node", allow_disasm, "Analysis", HandleGetCFGNode);
+
+    // Expression evaluation
+    ROUTE_POST_PERM("/tools/evaluate_expression", allow_read, "Utility", HandleEvaluateExpression);
+
+    // Task management (always allowed - no special permissions needed)
+    ROUTE_POST("/tools/task_status", HandleTaskStatus);
+    ROUTE_POST("/tools/task_cancel", HandleTaskCancel);
+    ROUTE_POST("/tools/task_list", HandleTaskList);
+    ROUTE_POST("/tools/task_cleanup", HandleTaskCleanup);
 
     #undef ROUTE_POST
     #undef ROUTE_POST_PERM

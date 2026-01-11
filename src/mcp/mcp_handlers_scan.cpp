@@ -2,14 +2,15 @@
  * MCP Handlers - Scanning
  *
  * Pattern and string scanning handlers:
- * - HandleScanPattern
- * - HandleScanStrings
+ * - HandleScanPattern / HandleScanPatternAsync
+ * - HandleScanStrings / HandleScanStringsAsync
  * - HandleFindXrefs
  */
 
 #include "mcp_server.h"
 #include "ui/application.h"
 #include "core/dma_interface.h"
+#include "core/task_manager.h"
 #include "analysis/pattern_scanner.h"
 #include "analysis/string_scanner.h"
 
@@ -18,6 +19,7 @@
 #include <iomanip>
 
 using json = nlohmann::json;
+using namespace orpheus::core;
 
 namespace orpheus::mcp {
 
@@ -167,14 +169,40 @@ std::string MCPServer::HandleFindXrefs(const std::string& body) {
         uint32_t size = req["size"];
         int max_results = req.value("max_results", 100);
 
+        // Validate parameters
+        if (target == 0) {
+            return CreateErrorResponse("Invalid target address: cannot find xrefs to NULL (0x0)");
+        }
+        if (base == 0) {
+            return CreateErrorResponse("Invalid base address: cannot scan from NULL (0x0)");
+        }
+        if (size == 0) {
+            return CreateErrorResponse("Invalid size: cannot scan 0 bytes");
+        }
+        if (size > 512 * 1024 * 1024) {  // 512MB limit
+            return CreateErrorResponse("Size too large: maximum scan region is 512MB");
+        }
+        if (max_results <= 0 || max_results > 10000) {
+            max_results = 100;  // Clamp to reasonable default
+        }
+
         auto* dma = app_->GetDMA();
         if (!dma || !dma->IsConnected()) {
-            return CreateErrorResponse("DMA not connected");
+            return CreateErrorResponse("DMA not connected - check hardware connection");
+        }
+
+        // Verify process exists
+        auto proc_info = dma->GetProcessInfo(pid);
+        if (!proc_info) {
+            return CreateErrorResponse("Process not found: PID " + std::to_string(pid) + " does not exist or has terminated");
         }
 
         auto data = dma->ReadMemory(pid, base, size);
         if (data.empty()) {
-            return CreateErrorResponse("Failed to read memory");
+            std::stringstream err;
+            err << "Failed to read scan region at " << FormatAddress(base)
+                << " (size: " << size << " bytes) - region may be unmapped or protected";
+            return CreateErrorResponse(err.str());
         }
 
         json result;
@@ -212,6 +240,218 @@ std::string MCPServer::HandleFindXrefs(const std::string& body) {
 
         result["count"] = xrefs.size();
         result["xrefs"] = xrefs;
+
+        return CreateSuccessResponse(result.dump());
+
+    } catch (const std::exception& e) {
+        return CreateErrorResponse(std::string("Error: ") + e.what());
+    }
+}
+
+std::string MCPServer::HandleScanPatternAsync(const std::string& body) {
+    try {
+        auto req = json::parse(body);
+        uint32_t pid = req["pid"];
+        uint64_t base = std::stoull(req["base"].get<std::string>(), nullptr, 16);
+        uint32_t size = req["size"];
+        std::string pattern = req["pattern"];
+
+        // Validate parameters (same as sync version)
+        if (pattern.empty()) {
+            return CreateErrorResponse("Invalid pattern: pattern string is empty");
+        }
+        if (base == 0) {
+            return CreateErrorResponse("Invalid base address: cannot scan from NULL (0x0)");
+        }
+        if (size == 0) {
+            return CreateErrorResponse("Invalid size: cannot scan 0 bytes");
+        }
+        if (size > 512 * 1024 * 1024) {
+            return CreateErrorResponse("Size too large: maximum scan region is 512MB");
+        }
+
+        auto* dma = app_->GetDMA();
+        if (!dma || !dma->IsConnected()) {
+            return CreateErrorResponse("DMA not connected - check hardware connection");
+        }
+
+        auto proc_info = dma->GetProcessInfo(pid);
+        if (!proc_info) {
+            return CreateErrorResponse("Process not found: PID " + std::to_string(pid));
+        }
+
+        auto compiled = analysis::PatternScanner::Compile(pattern);
+        if (!compiled) {
+            return CreateErrorResponse("Invalid pattern syntax: '" + pattern + "'");
+        }
+
+        // Capture what we need for the async task
+        auto* app = app_;
+        std::string base_str = req["base"].get<std::string>();
+
+        std::stringstream desc;
+        desc << "Pattern scan: " << pattern << " in " << (size / 1024) << "KB";
+
+        // Start async task
+        auto task_id = TaskManager::Instance().StartTask(
+            "pattern_scan",
+            desc.str(),
+            [app, pid, base, size, pattern, compiled = *compiled, base_str](
+                CancellationTokenPtr cancel,
+                ProgressCallback progress
+            ) -> json {
+                auto* dma = app->GetDMA();
+                if (!dma || !dma->IsConnected()) {
+                    throw std::runtime_error("DMA disconnected during scan");
+                }
+
+                progress(0.1f, "Reading memory...");
+
+                if (cancel->IsCancelled()) {
+                    throw std::runtime_error("Cancelled");
+                }
+
+                auto data = dma->ReadMemory(pid, base, size);
+                if (data.empty()) {
+                    throw std::runtime_error("Failed to read scan region");
+                }
+
+                progress(0.3f, "Scanning for pattern...");
+
+                if (cancel->IsCancelled()) {
+                    throw std::runtime_error("Cancelled");
+                }
+
+                auto results = analysis::PatternScanner::Scan(data, compiled, base, 100);
+
+                progress(0.9f, "Formatting results...");
+
+                json result;
+                result["pattern"] = pattern;
+                result["base"] = base_str;
+                result["count"] = results.size();
+
+                json addresses = json::array();
+                for (uint64_t addr : results) {
+                    std::stringstream ss;
+                    ss << "0x" << std::hex << addr;
+                    addresses.push_back(ss.str());
+                }
+                result["addresses"] = addresses;
+
+                return result;
+            }
+        );
+
+        json result;
+        result["task_id"] = task_id;
+        result["status"] = "started";
+        result["description"] = desc.str();
+
+        return CreateSuccessResponse(result.dump());
+
+    } catch (const std::exception& e) {
+        return CreateErrorResponse(std::string("Error: ") + e.what());
+    }
+}
+
+std::string MCPServer::HandleScanStringsAsync(const std::string& body) {
+    try {
+        auto req = json::parse(body);
+        uint32_t pid = req["pid"];
+        uint64_t base = std::stoull(req["base"].get<std::string>(), nullptr, 16);
+        uint32_t size = req["size"];
+        int min_length = req.value("min_length", 4);
+
+        // Validate parameters
+        if (base == 0) {
+            return CreateErrorResponse("Invalid base address: cannot scan from NULL (0x0)");
+        }
+        if (size == 0) {
+            return CreateErrorResponse("Invalid size: cannot scan 0 bytes");
+        }
+        if (size > 512 * 1024 * 1024) {
+            return CreateErrorResponse("Size too large: maximum scan region is 512MB");
+        }
+        if (min_length < 1 || min_length > 256) {
+            return CreateErrorResponse("Invalid min_length: must be between 1 and 256");
+        }
+
+        auto* dma = app_->GetDMA();
+        if (!dma || !dma->IsConnected()) {
+            return CreateErrorResponse("DMA not connected");
+        }
+
+        auto proc_info = dma->GetProcessInfo(pid);
+        if (!proc_info) {
+            return CreateErrorResponse("Process not found: PID " + std::to_string(pid));
+        }
+
+        auto* app = app_;
+        std::string base_str = req["base"].get<std::string>();
+
+        std::stringstream desc;
+        desc << "String scan: " << (size / 1024) << "KB (min_length=" << min_length << ")";
+
+        auto task_id = TaskManager::Instance().StartTask(
+            "string_scan",
+            desc.str(),
+            [app, pid, base, size, min_length, base_str](
+                CancellationTokenPtr cancel,
+                ProgressCallback progress
+            ) -> json {
+                auto* dma = app->GetDMA();
+                if (!dma || !dma->IsConnected()) {
+                    throw std::runtime_error("DMA disconnected during scan");
+                }
+
+                progress(0.1f, "Reading memory...");
+
+                if (cancel->IsCancelled()) {
+                    throw std::runtime_error("Cancelled");
+                }
+
+                auto data = dma->ReadMemory(pid, base, size);
+                if (data.empty()) {
+                    throw std::runtime_error("Failed to read scan region");
+                }
+
+                progress(0.3f, "Scanning for strings...");
+
+                if (cancel->IsCancelled()) {
+                    throw std::runtime_error("Cancelled");
+                }
+
+                analysis::StringScanOptions opts;
+                opts.min_length = min_length;
+                auto results = analysis::StringScanner::Scan(data, opts, base);
+
+                progress(0.9f, "Formatting results...");
+
+                json result;
+                result["base"] = base_str;
+                result["count"] = results.size();
+
+                json strings = json::array();
+                for (const auto& str : results) {
+                    json s;
+                    std::stringstream ss;
+                    ss << "0x" << std::hex << str.address;
+                    s["address"] = ss.str();
+                    s["value"] = str.value;
+                    s["type"] = str.type == analysis::StringType::ASCII ? "ASCII" : "UTF16";
+                    strings.push_back(s);
+                }
+                result["strings"] = strings;
+
+                return result;
+            }
+        );
+
+        json result;
+        result["task_id"] = task_id;
+        result["status"] = "started";
+        result["description"] = desc.str();
 
         return CreateSuccessResponse(result.dump());
 
