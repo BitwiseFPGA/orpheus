@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Orpheus VERSION 1.0.0 LANGUAGES CXX)
+project(Orpheus VERSION 0.1.4 LANGUAGES CXX)
 
 # C++20 Standard
 set(CMAKE_CXX_STANDARD 20)
@@ -33,6 +33,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Include custom CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(EmbedResources)
+include(Version)
 
 # Embed all DLLs at configure time
 message(STATUS "Embedding DLL resources...")

@@ -30,6 +30,7 @@
 #include "emulation/emulator.h"  // Required for unique_ptr destructor
 #include "dumper/cs2_schema.h"   // Required for destructor cleanup
 #include "utils/logger.h"
+#include "version.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -282,11 +283,16 @@ void MCPServer::SetupRoutes() {
             res.set_content(handler(req.body), "application/json"); \
         })
 
-    // Health check
+    // Health check with version info
     server->Get("/health", [](const httplib::Request&, httplib::Response& res) {
         json response;
         response["status"] = "ok";
         response["service"] = "Orpheus MCP Server";
+        response["version"] = orpheus::version::VERSION;
+        response["version_full"] = orpheus::version::VERSION_FULL;
+        response["git_hash"] = orpheus::version::GIT_HASH_SHORT;
+        response["build_date"] = orpheus::version::BUILD_DATE;
+        response["platform"] = orpheus::version::PLATFORM;
         res.set_content(response.dump(), "application/json");
     });
 

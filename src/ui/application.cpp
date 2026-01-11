@@ -15,6 +15,7 @@
 #include "dumper/cs2_schema.h"
 #include "decompiler/decompiler.hh"
 #include "embedded_resources.h"
+#include "version.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -1215,6 +1216,13 @@ void Application::RenderStatusBar() {
         if (!status_message_.empty()) {
             ImGui::SameLine(0, 20.0f);
             ImGui::Text("%s", status_message_.c_str());
+        }
+
+        // Version info on far right
+        ImGui::SameLine(ImGui::GetWindowWidth() - 80.0f);
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "v%s", orpheus::version::VERSION);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", orpheus::version::GetBuildInfo());
         }
     }
     ImGui::End();
