@@ -12,6 +12,7 @@
 #include "core/dma_interface.h"
 #include "core/runtime_manager.h"
 #include "analysis/disassembler.h"
+#include "analysis/signature.h"
 #include "decompiler/decompiler.hh"
 #include "dumper/cs2_schema.h"
 
@@ -387,6 +388,81 @@ std::string MCPServer::HandleDumpModule(const std::string& body) {
         result["size"] = mod_opt->size;
         result["output"] = output_path;
         result["bytes_written"] = data.size();
+
+        return CreateSuccessResponse(result.dump());
+
+    } catch (const std::exception& e) {
+        return CreateErrorResponse(std::string("Error: ") + e.what());
+    }
+}
+
+std::string MCPServer::HandleGenerateSignature(const std::string& body) {
+    try {
+        auto req = json::parse(body);
+        uint32_t pid = req["pid"];
+        std::string address_str = req["address"];
+        uint64_t address = std::stoull(address_str, nullptr, 16);
+
+        // Optional parameters
+        size_t size = req.value("size", 64);
+        size_t instruction_count = req.value("instruction_count", 0);
+
+        // Signature options
+        analysis::SignatureOptions options;
+        options.wildcard_rip_relative = req.value("wildcard_rip_relative", true);
+        options.wildcard_calls = req.value("wildcard_calls", true);
+        options.wildcard_jumps = req.value("wildcard_jumps", true);
+        options.wildcard_large_immediates = req.value("wildcard_large_immediates", true);
+        options.min_unique_bytes = req.value("min_unique_bytes", 8);
+        options.max_length = req.value("max_length", 64);
+
+        auto* dma = app_->GetDMA();
+        if (!dma || !dma->IsConnected()) {
+            return CreateErrorResponse("DMA not connected");
+        }
+
+        // Read bytes
+        size_t read_size = instruction_count > 0 ? std::max(size, instruction_count * 15) : size;
+        read_size = std::min(read_size, size_t(256)); // Cap at 256 bytes
+        auto data = dma->ReadMemory(pid, address, read_size);
+        if (data.empty()) {
+            return CreateErrorResponse("Failed to read memory at " + address_str);
+        }
+
+        // Generate signature
+        analysis::SignatureGenerator generator;
+        analysis::SignatureResult sig;
+
+        if (instruction_count > 0) {
+            sig = generator.GenerateFromInstructions(data, address, instruction_count, options);
+        } else {
+            sig = generator.Generate(data, address, options);
+        }
+
+        // Build response
+        json result;
+        result["address"] = FormatAddress(address);
+        result["pattern"] = sig.pattern;
+        result["pattern_ida"] = analysis::SignatureGenerator::FormatIDA(sig);
+        result["pattern_ce"] = analysis::SignatureGenerator::FormatCE(sig);
+        result["mask"] = sig.pattern_mask;
+        result["length"] = sig.length;
+        result["instruction_count"] = sig.instruction_count;
+        result["unique_bytes"] = sig.unique_bytes;
+        result["uniqueness_ratio"] = sig.uniqueness_ratio;
+        result["is_valid"] = sig.is_valid;
+
+        if (!sig.is_valid) {
+            result["warning"] = "Signature may not be unique enough (less than " +
+                               std::to_string(options.min_unique_bytes) + " unique bytes)";
+        }
+
+        // Add module context if available
+        auto ctx = ResolveAddressContext(pid, address);
+        if (ctx.resolved) {
+            result["module"] = ctx.module_name;
+            result["module_offset"] = FormatAddress(ctx.offset);
+        }
 
         return CreateSuccessResponse(result.dump());
 

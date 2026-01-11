@@ -336,6 +336,13 @@ void MCPServer::SetupRoutes() {
     ROUTE_POST_PERM("/tools/disassemble", allow_disasm, "Disassembly", HandleDisassemble);
     ROUTE_POST_PERM("/tools/decompile", allow_disasm, "Decompile", HandleDecompile);
     ROUTE_POST_PERM("/tools/dump_module", allow_dump, "Dump", HandleDumpModule);
+    ROUTE_POST_PERM("/tools/generate_signature", allow_disasm, "Signature", HandleGenerateSignature);
+
+    // Memory diff engine
+    ROUTE_POST_PERM("/tools/memory_snapshot", allow_read, "Memory", HandleMemorySnapshot);
+    ROUTE_POST("/tools/memory_snapshot_list", HandleMemorySnapshotList);
+    ROUTE_POST("/tools/memory_snapshot_delete", HandleMemorySnapshotDelete);
+    ROUTE_POST_PERM("/tools/memory_diff", allow_read, "Memory", HandleMemoryDiff);
 
     // RTTI analysis
     ROUTE_POST_PERM("/tools/rtti_parse_vtable", allow_rtti, "RTTI", HandleRTTIParseVTable);

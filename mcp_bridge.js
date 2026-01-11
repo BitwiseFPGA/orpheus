@@ -6,7 +6,7 @@
  */
 
 // Bridge version - increment when tools or functionality changes
-const BRIDGE_VERSION = '1.2.0';
+const BRIDGE_VERSION = '1.3.0';
 
 const http = require('http');
 const https = require('https');
@@ -372,6 +372,160 @@ const MCP_TOOLS = [
         }
       },
       required: ['pid', 'address']
+    }
+  },
+  {
+    name: 'generate_signature',
+    description: 'Generate an IDA-style byte signature from code at the specified address. Automatically wildcards relocatable bytes (RIP-relative offsets, call targets, large immediates). Returns pattern in IDA and Cheat Engine formats with quality metrics.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Address to generate signature from (hex)'
+        },
+        size: {
+          type: 'integer',
+          description: 'Number of bytes to include in signature. Default: 64',
+          default: 64
+        },
+        instruction_count: {
+          type: 'integer',
+          description: 'Alternative to size: number of instructions to include. If set, overrides size.'
+        },
+        wildcard_rip_relative: {
+          type: 'boolean',
+          description: 'Wildcard RIP-relative memory offsets. Default: true',
+          default: true
+        },
+        wildcard_calls: {
+          type: 'boolean',
+          description: 'Wildcard CALL rel32 offsets. Default: true',
+          default: true
+        },
+        wildcard_jumps: {
+          type: 'boolean',
+          description: 'Wildcard JMP rel32 offsets. Default: true',
+          default: true
+        },
+        wildcard_large_immediates: {
+          type: 'boolean',
+          description: 'Wildcard 4+ byte immediate values. Default: true',
+          default: true
+        },
+        min_unique_bytes: {
+          type: 'integer',
+          description: 'Minimum non-wildcarded bytes for a valid signature. Default: 8',
+          default: 8
+        },
+        max_length: {
+          type: 'integer',
+          description: 'Maximum signature length in bytes. Default: 64',
+          default: 64
+        }
+      },
+      required: ['pid', 'address']
+    }
+  },
+  {
+    name: 'memory_snapshot',
+    description: 'Take a snapshot of a memory region for later comparison. Snapshots are stored in memory and can be compared to find changed values.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: {
+          type: 'integer',
+          description: 'Process ID'
+        },
+        address: {
+          type: 'string',
+          description: 'Base address of memory region (hex)'
+        },
+        size: {
+          type: 'integer',
+          description: 'Size of region to snapshot in bytes (max 16MB)'
+        },
+        name: {
+          type: 'string',
+          description: 'Optional name for the snapshot. Auto-generated if not provided.'
+        }
+      },
+      required: ['pid', 'address', 'size']
+    }
+  },
+  {
+    name: 'memory_snapshot_list',
+    description: 'List all stored memory snapshots with their addresses, sizes, and timestamps.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    name: 'memory_snapshot_delete',
+    description: 'Delete a stored memory snapshot by name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Name of the snapshot to delete'
+        }
+      },
+      required: ['name']
+    }
+  },
+  {
+    name: 'memory_diff',
+    description: 'Compare memory snapshots to find changed values. Can compare two snapshots or a snapshot against current memory. Useful for finding dynamic values like health, ammo, position, etc.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['snapshot_vs_current', 'snapshot_vs_snapshot'],
+          description: 'Comparison mode. Default: snapshot_vs_current',
+          default: 'snapshot_vs_current'
+        },
+        snapshot: {
+          type: 'string',
+          description: 'Snapshot name (for snapshot_vs_current mode)'
+        },
+        snapshot_a: {
+          type: 'string',
+          description: 'First snapshot name (for snapshot_vs_snapshot mode)'
+        },
+        snapshot_b: {
+          type: 'string',
+          description: 'Second snapshot name (for snapshot_vs_snapshot mode)'
+        },
+        pid: {
+          type: 'integer',
+          description: 'Process ID (optional, uses snapshot PID if not provided)'
+        },
+        filter: {
+          type: 'string',
+          enum: ['all', 'changed', 'increased', 'decreased', 'unchanged'],
+          description: 'Filter results by change type. Default: all',
+          default: 'all'
+        },
+        value_size: {
+          type: 'integer',
+          enum: [1, 2, 4, 8],
+          description: 'Size of values to compare in bytes. Default: 4',
+          default: 4
+        },
+        max_results: {
+          type: 'integer',
+          description: 'Maximum number of results to return. Default: 1000',
+          default: 1000
+        }
+      },
+      required: []
     }
   },
   {
@@ -1399,6 +1553,11 @@ const TOOL_ENDPOINT_MAP = {
   'scan_strings_async': { method: 'POST', path: '/tools/scan_strings_async' },
   'disassemble': { method: 'POST', path: '/tools/disassemble' },
   'decompile': { method: 'POST', path: '/tools/decompile' },
+  'generate_signature': { method: 'POST', path: '/tools/generate_signature' },
+  'memory_snapshot': { method: 'POST', path: '/tools/memory_snapshot' },
+  'memory_snapshot_list': { method: 'POST', path: '/tools/memory_snapshot_list' },
+  'memory_snapshot_delete': { method: 'POST', path: '/tools/memory_snapshot_delete' },
+  'memory_diff': { method: 'POST', path: '/tools/memory_diff' },
   'get_processes': { method: 'GET', path: '/tools/processes' },
   'get_modules': { method: 'POST', path: '/tools/modules' },
   'resolve_pointer': { method: 'POST', path: '/tools/resolve_pointer' },

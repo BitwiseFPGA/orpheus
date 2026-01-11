@@ -8,6 +8,7 @@
 #include <vector>
 #include <map>
 #include <mutex>
+#include <chrono>
 #include "../utils/cache_manager.h"
 
 namespace orpheus {
@@ -129,6 +130,14 @@ private:
     std::string HandleDumpModule(const std::string& body);
     std::string HandleDisassemble(const std::string& body);
     std::string HandleDecompile(const std::string& body);
+    std::string HandleGenerateSignature(const std::string& body);
+
+    // Memory diff tools
+    std::string HandleMemorySnapshot(const std::string& body);
+    std::string HandleMemorySnapshotList(const std::string& body);
+    std::string HandleMemorySnapshotDelete(const std::string& body);
+    std::string HandleMemoryDiff(const std::string& body);
+
     std::string HandleGetProcesses(const std::string& body);
     std::string HandleGetModules(const std::string& body);
     std::string HandleFindXrefs(const std::string& body);
@@ -264,6 +273,17 @@ private:
     std::string IdentifyClassFromPointer(uint32_t pid, uint64_t ptr, uint64_t module_base = 0);
     // RTTI+Schema helper: strip "class " or "struct " prefix
     static std::string StripTypePrefix(const std::string& name);
+
+    // Memory snapshot storage for diff engine
+    struct MemorySnapshot {
+        std::string name;
+        uint32_t pid;
+        uint64_t address;
+        std::vector<uint8_t> data;
+        std::chrono::system_clock::time_point timestamp;
+    };
+    mutable std::mutex snapshot_mutex_;
+    std::map<std::string, MemorySnapshot> snapshots_;
 };
 
 } // namespace mcp
