@@ -23,9 +23,9 @@
 
 #include <GLFW/glfw3.h>
 
-// OpenGL for texture functions
-#ifdef PLATFORM_LINUX
-#include <GL/gl.h>
+// OpenGL for texture functions (GL_CLAMP_TO_EDGE is 1.2+ but Windows gl.h is 1.1)
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
 #endif
 
 // stb_image for icon loading
