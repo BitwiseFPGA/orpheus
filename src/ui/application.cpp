@@ -1218,8 +1218,10 @@ void Application::RenderStatusBar() {
         if (mcp_running) {
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), "MCP");
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("MCP Server running on port %d\nClick to open settings",
-                    mcp_config_ ? mcp_config_->port : 8765);
+                std::string bind_addr = mcp_config_ ? mcp_config_->bind_address : "127.0.0.1";
+                uint16_t port = mcp_config_ ? mcp_config_->port : 8765;
+                ImGui::SetTooltip("MCP Server running on %s:%d\nClick to open settings",
+                    bind_addr.c_str(), port);
             }
             if (ImGui::IsItemClicked()) {
                 show_settings_ = true;
@@ -4941,7 +4943,37 @@ void Application::RenderSettingsDialog() {
                     }
                 }
                 ImGui::SameLine();
-                ImGui::TextDisabled("(all interfaces, default: 8765)");
+                ImGui::TextDisabled("(default: 8765)");
+
+                ImGui::Spacing();
+
+                // Bind address configuration
+                ImGui::Text("Bind Address:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(200);
+                char bind_addr_input[128];
+                strncpy(bind_addr_input, mcp_config_->bind_address.c_str(), sizeof(bind_addr_input) - 1);
+                bind_addr_input[sizeof(bind_addr_input) - 1] = '\0';
+                if (ImGui::InputText("##bind_addr", bind_addr_input, sizeof(bind_addr_input))) {
+                    mcp_config_->bind_address = bind_addr_input;
+                    mcp_config_dirty_ = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Localhost")) {
+                    mcp_config_->bind_address = "127.0.0.1";
+                    mcp_config_dirty_ = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Secure: Only accessible from this machine");
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("All Interfaces")) {
+                    mcp_config_->bind_address = "0.0.0.0";
+                    mcp_config_dirty_ = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Listen on all network interfaces (allows remote access)");
+                }
 
                 ImGui::Spacing();
 
