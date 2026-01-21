@@ -8,6 +8,7 @@
 #include <deque>
 #include <future>
 #include <atomic>
+#include <chrono>
 
 #include "core/dma_interface.h"
 
@@ -26,6 +27,7 @@ namespace analysis {
     class MemoryWatcher;
     class RTTIParser;
     class CFGBuilder;
+    class FunctionRecovery;
     struct InstructionInfo;
     struct StringMatch;
     struct PatternMatch;
@@ -35,6 +37,7 @@ namespace analysis {
     struct ControlFlowGraph;
     struct CFGNode;
     struct CFGEdge;
+    struct FunctionInfo;
 }
 
 namespace mcp {
@@ -106,6 +109,13 @@ struct PanelState {
     bool cfg_viewer = false;  // Control Flow Graph visualization
     bool cs2_radar = false;  // CS2 Live Radar view
     bool cs2_dashboard = false;  // CS2 Player Dashboard
+    bool pointer_chain = false;  // Pointer Chain Resolver
+    bool memory_regions = false;  // VAD memory regions panel
+    bool xref_finder = false;    // Cross-reference finder panel
+    bool function_recovery = false;  // Function recovery panel
+    bool vtable_reader = false;      // VTable reader panel
+    bool cache_manager = false;      // Cache management panel
+    bool task_manager = false;       // Background task manager panel
 };
 
 /**
@@ -173,6 +183,13 @@ private:
     void RenderCFGViewer();
     void RenderCS2Radar();
     void RenderCS2Dashboard();
+    void RenderPointerChain();
+    void RenderMemoryRegions();
+    void RenderXRefFinder();
+    void RenderFunctionRecovery();
+    void RenderVTableReader();
+    void RenderCacheManager();
+    void RenderTaskManager();
 
     // Dialogs
     void RenderCommandPalette();
@@ -480,6 +497,111 @@ private:
     bool dashboard_show_all_players_ = true;
     bool dashboard_show_bots_ = false;
     int dashboard_selected_player_ = -1;
+
+    // Pointer Chain Resolver state
+    char pointer_base_input_[32] = {};
+    char pointer_offsets_input_[256] = {};  // comma-separated offsets
+    std::vector<std::pair<uint64_t, uint64_t>> pointer_chain_results_;  // (address, value) pairs
+    uint64_t pointer_final_address_ = 0;
+    std::string pointer_chain_error_;
+    int pointer_final_type_ = 0;  // 0=int32, 1=float, 2=int64, 3=double
+
+    // Memory Regions state
+    std::vector<MemoryRegion> cached_memory_regions_;
+    uint32_t memory_regions_pid_ = 0;  // Track which PID the regions belong to
+    char memory_regions_filter_[256] = {};
+    int memory_regions_sort_column_ = 0;  // 0=base, 1=size, 2=protection, 3=type
+    bool memory_regions_sort_ascending_ = true;
+
+    // Function Recovery state
+    std::unique_ptr<analysis::FunctionRecovery> function_recovery_;
+    std::vector<analysis::FunctionInfo> recovered_functions_;
+    std::future<std::map<uint64_t, analysis::FunctionInfo>> function_recovery_future_;
+    bool function_recovery_running_ = false;
+    char function_filter_[256] = {};
+    uint64_t function_recovery_module_base_ = 0;
+    uint32_t function_recovery_module_size_ = 0;
+    std::string function_recovery_module_name_;
+    bool function_recovery_use_prologues_ = true;
+    bool function_recovery_follow_calls_ = true;
+    bool function_recovery_use_pdata_ = true;
+    std::string function_recovery_progress_stage_;
+    float function_recovery_progress_ = 0.0f;
+    int function_recovery_sort_column_ = 0;  // 0=address, 1=size, 2=name, 3=source
+    bool function_recovery_sort_ascending_ = true;
+    char function_containing_input_[32] = {};
+    uint64_t function_containing_result_addr_ = 0;
+    std::string function_containing_result_name_;
+
+    // XRef Finder state
+    struct XRefResult {
+        uint64_t address = 0;
+        std::string type;       // "ptr64" or "rel32"
+        std::string context;    // module+offset
+    };
+    char xref_target_input_[32] = {};
+    char xref_base_input_[32] = {};
+    char xref_size_input_[16] = {};
+    std::vector<XRefResult> xref_results_;
+    bool xref_use_module_ = true;  // Use selected module vs custom range
+    bool xref_scanning_ = false;
+
+    // Signature Generator state (in disassembly panel)
+    std::string generated_signature_;
+    std::string generated_signature_ida_;
+    std::string generated_signature_ce_;
+    std::string generated_signature_mask_;
+    int generated_signature_length_ = 0;
+    int generated_signature_unique_ = 0;
+    float generated_signature_ratio_ = 0.0f;
+    bool generated_signature_valid_ = false;
+    bool show_signature_popup_ = false;
+    uint64_t signature_address_ = 0;
+
+    // VTable Reader state
+    struct VTableEntry {
+        uint64_t address = 0;        // Function pointer address
+        uint64_t function = 0;       // Function pointer value
+        std::string context;         // module+offset
+        std::string first_instr;     // First instruction at function
+        bool valid = false;
+    };
+    char vtable_address_input_[32] = {};
+    int vtable_entry_count_ = 20;    // Number of entries to read
+    bool vtable_disasm_ = false;     // Show first instruction of each entry
+    std::vector<VTableEntry> vtable_entries_;
+    std::string vtable_class_name_;  // RTTI class name if found
+    std::string vtable_error_;
+
+    // Cache Manager state
+    struct CacheEntry {
+        std::string name;
+        std::string path;
+        size_t size = 0;
+        std::string modified;
+        std::string type;  // "rtti", "schema", "functions"
+    };
+    std::vector<CacheEntry> cache_entries_;
+    int cache_selected_type_ = 0;  // 0=All, 1=RTTI, 2=Schema, 3=Functions
+    char cache_filter_[256] = {};
+    bool cache_needs_refresh_ = true;
+
+    // Task Manager state
+    struct TaskInfo {
+        std::string id;
+        std::string type;           // "pattern_scan", "string_scan", etc.
+        std::string status;         // "pending", "running", "completed", "failed", "cancelled"
+        float progress = 0.0f;      // 0.0 - 1.0
+        std::string message;        // Status message
+        std::string result_preview; // Preview of result (first few matches, etc.)
+        std::chrono::system_clock::time_point created;
+        std::chrono::system_clock::time_point completed;
+    };
+    std::vector<TaskInfo> task_list_;
+    bool task_list_auto_refresh_ = true;
+    float task_refresh_timer_ = 0.0f;
+    float task_refresh_interval_ = 0.5f;  // Refresh every 500ms
+    int task_filter_status_ = 0;  // 0=All, 1=Running, 2=Completed, 3=Failed
 
     // Helper functions for radar
     bool LoadRadarMap(const std::string& map_name);

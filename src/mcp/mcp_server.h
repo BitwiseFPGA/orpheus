@@ -7,6 +7,7 @@
 #include <functional>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <mutex>
 #include <chrono>
 #include "../utils/cache_manager.h"
@@ -34,6 +35,7 @@ struct MCPConfig {
     uint16_t port = 8765;
     std::string api_key;
     bool require_auth = true;
+    std::string bind_address = "127.0.0.1";  // Default to localhost for security
 
     // Feature flags
     bool allow_read = true;
@@ -272,6 +274,27 @@ private:
         bool initialized = false;
     };
     CS2EntityCache cs2_entity_cache_;
+
+    // In-memory schema cache for fast field lookups (loaded from disk cache on cs2_init)
+    struct SchemaFieldInfo {
+        std::string name;
+        std::string type;
+        uint32_t offset;
+    };
+    struct SchemaClassInfo {
+        std::string name;
+        std::string scope;  // e.g., "client.dll"
+        std::string parent;
+        std::vector<SchemaFieldInfo> fields;
+    };
+    mutable std::mutex schema_mem_cache_mutex_;
+    std::unordered_map<std::string, SchemaClassInfo> schema_mem_cache_;  // key: lowercase class name
+    bool schema_mem_cache_loaded_ = false;
+
+    // Helper to load schema into memory cache
+    void LoadSchemaIntoMemory();
+    // Helper to find class in memory cache (case-insensitive)
+    const SchemaClassInfo* FindSchemaClass(const std::string& class_name) const;
 
     // RTTI+Schema helper: identify class from pointer
     std::string IdentifyClassFromPointer(uint32_t pid, uint64_t ptr, uint64_t module_base = 0);

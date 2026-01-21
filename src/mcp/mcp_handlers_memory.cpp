@@ -222,6 +222,10 @@ std::string MCPServer::HandleResolvePointerChain(const std::string& body) {
 
         json chain = json::array();
 
+        // Store pointer values as we traverse to avoid duplicate reads
+        std::vector<uint64_t> ptr_values;
+        ptr_values.reserve(offsets.size());
+
         uint64_t current = base;
         chain.push_back({
             {"step", 0},
@@ -230,6 +234,7 @@ std::string MCPServer::HandleResolvePointerChain(const std::string& body) {
             {"operation", "base"}
         });
 
+        bool chain_valid = true;
         for (size_t i = 0; i < offsets.size(); i++) {
             // Read pointer at current address
             auto ptr_opt = dma->Read<uint64_t>(pid, current);
@@ -237,10 +242,13 @@ std::string MCPServer::HandleResolvePointerChain(const std::string& body) {
                 result["error"] = "Failed to read pointer at step " + std::to_string(i);
                 result["failed_at"] = FormatAddress(current);
                 result["chain"] = chain;
-                return CreateSuccessResponse(result.dump());
+                chain_valid = false;
+                break;
             }
 
             uint64_t ptr_value = *ptr_opt;
+            ptr_values.push_back(ptr_value);  // Store for visualization
+
             chain.push_back({
                 {"step", i + 1},
                 {"address", FormatAddress(current)},
@@ -259,20 +267,21 @@ std::string MCPServer::HandleResolvePointerChain(const std::string& body) {
             });
         }
 
+        if (!chain_valid) {
+            return CreateSuccessResponse(result.dump());
+        }
+
         result["final_address"] = FormatAddress(current);
         result["final_context"] = FormatAddressWithContext(pid, current);
         result["chain"] = chain;
 
-        // Build compact visualization: base -> [0x1234] -> +0x10 -> [0x5678] -> +0x20 -> final
+        // Build compact visualization using stored pointer values (no duplicate reads)
         std::stringstream viz;
         viz << FormatAddress(base);
 
         uint64_t viz_current = base;
-        for (size_t i = 0; i < offsets.size(); i++) {
-            auto ptr_opt = dma->Read<uint64_t>(pid, viz_current);
-            if (!ptr_opt) break;
-
-            uint64_t ptr_value = *ptr_opt;
+        for (size_t i = 0; i < ptr_values.size(); i++) {
+            uint64_t ptr_value = ptr_values[i];
             viz << " -> [" << FormatAddress(ptr_value) << "]";
 
             if (offsets[i] >= 0) {

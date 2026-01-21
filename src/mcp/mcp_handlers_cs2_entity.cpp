@@ -392,6 +392,14 @@ std::string MCPServer::HandleCS2Init(const std::string& body) {
         result["local_player"] = local_player.empty() ? json(nullptr) : local_player;
         result["ready"] = cs2_entity_cache_.initialized && !local_player.empty();
 
+        // Load schema into memory cache for fast field lookups
+        LoadSchemaIntoMemory();
+        result["schema_mem_cached"] = schema_mem_cache_loaded_;
+        {
+            std::lock_guard<std::mutex> lock(schema_mem_cache_mutex_);
+            result["schema_mem_classes"] = schema_mem_cache_.size();
+        }
+
         LOG_INFO("CS2 initialized: {} classes, {} fields, entity_system={}, ready={}",
                  class_count, field_count,
                  FormatAddress(cs2_entity_cache_.entity_system),
@@ -497,59 +505,38 @@ std::string MCPServer::HandleCS2ReadField(const std::string& body) {
             }
         }
 
-        // Look up field from cache (ASLR-safe - offsets are class-relative)
-        namespace fs = std::filesystem;
-        std::string cache_dir = cs2_schema_cache_.GetDirectory();
-
-        std::string class_lower = utils::string_utils::ToLower(class_name);
-        std::string field_lower = utils::string_utils::ToLower(field_name);
-
+        // Look up field from in-memory cache (ASLR-safe - offsets are class-relative)
         uint32_t field_offset = 0;
-        uint32_t field_size = 0;
         std::string field_type;
         bool found = false;
 
-        for (const auto& entry : fs::directory_iterator(cache_dir)) {
-            if (entry.path().extension() != ".json") continue;
-
-            std::ifstream in(entry.path());
-            if (!in.is_open()) continue;
-
-            try {
-                json cache_data = json::parse(in);
-                if (!cache_data.contains("classes")) continue;
-
-                for (const auto& cls : cache_data["classes"]) {
-                    std::string cls_name = cls.value("name", "");
-                    if (utils::string_utils::ToLower(cls_name) != class_lower) continue;
-
-                    if (cls.contains("fields")) {
-                        for (const auto& fld : cls["fields"]) {
-                            std::string fld_name = fld.value("name", "");
-                            if (utils::string_utils::ToLower(fld_name) == field_lower) {
-                                field_offset = fld.value("offset", 0);
-                                field_size = fld.value("size", 0);
-                                field_type = fld.value("type", "");
-                                field_name = fld_name;  // Use actual case from cache
-                                class_name = cls_name;
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (found) break;
+        // Use in-memory cache for O(1) lookup
+        const SchemaClassInfo* schema_class = FindSchemaClass(class_name);
+        if (schema_class) {
+            class_name = schema_class->name;  // Use actual case
+            std::string field_lower = utils::string_utils::ToLower(field_name);
+            for (const auto& fld : schema_class->fields) {
+                if (utils::string_utils::ToLower(fld.name) == field_lower) {
+                    field_offset = fld.offset;
+                    field_type = fld.type;
+                    field_name = fld.name;  // Use actual case
+                    found = true;
+                    break;
                 }
-            } catch (...) { continue; }
-            if (found) break;
+            }
         }
 
         if (!found) {
+            // Memory cache might not be loaded, provide helpful error
+            if (!schema_mem_cache_loaded_) {
+                return CreateErrorResponse("Schema not loaded - call cs2_init first");
+            }
             return CreateErrorResponse("Field not found in cache: " + field_name + " in class " + class_name);
         }
 
         // Read field value using TypeResolver
         uint64_t field_addr = address + field_offset;
-        size_t read_size = field_size > 0 ? field_size : utils::TypeResolver::GetReadSize(field_type);
+        size_t read_size = utils::TypeResolver::GetReadSize(field_type);
 
         auto data = dma->ReadMemory(pid, field_addr, read_size);
         if (data.empty()) {
@@ -628,85 +615,55 @@ std::string MCPServer::HandleCS2Inspect(const std::string& body) {
             }
         }
 
-        // Look up class from cache (ASLR-safe - offsets are class-relative)
-        namespace fs = std::filesystem;
-        std::string cache_dir = cs2_schema_cache_.GetDirectory();
-        std::string class_lower = utils::string_utils::ToLower(class_name);
-
-        json cached_class;
-        bool found_class = false;
-
-        for (const auto& entry : fs::directory_iterator(cache_dir)) {
-            if (entry.path().extension() != ".json") continue;
-
-            std::ifstream in(entry.path());
-            if (!in.is_open()) continue;
-
-            try {
-                json cache_data = json::parse(in);
-                if (!cache_data.contains("classes")) continue;
-
-                for (const auto& cls : cache_data["classes"]) {
-                    std::string cls_name = cls.value("name", "");
-                    if (utils::string_utils::ToLower(cls_name) == class_lower) {
-                        cached_class = cls;
-                        class_name = cls_name;  // Use actual case
-                        found_class = true;
-                        break;
-                    }
-                }
-            } catch (...) { continue; }
-            if (found_class) break;
-        }
-
-        if (!found_class) {
+        // Look up class from in-memory cache (ASLR-safe - offsets are class-relative)
+        const SchemaClassInfo* schema_class = FindSchemaClass(class_name);
+        if (!schema_class) {
+            if (!schema_mem_cache_loaded_) {
+                return CreateErrorResponse("Schema not loaded - call cs2_init first");
+            }
             return CreateErrorResponse("Schema class not found in cache: " + class_name);
         }
+
+        class_name = schema_class->name;  // Use actual case
 
         json result;
         result["address"] = FormatAddress(address);
         result["class"] = class_name;
-        result["base_class"] = cached_class.value("base_class", "");
-        result["size"] = cached_class.value("size", 0);
+        result["base_class"] = schema_class->parent;
+        result["size"] = 0;  // Size not stored in memory cache
 
         json fields_out = json::array();
         int field_count = 0;
 
-        if (cached_class.contains("fields")) {
-            for (const auto& field : cached_class["fields"]) {
-                if (field_count >= max_fields) break;
+        for (const auto& field : schema_class->fields) {
+            if (field_count >= max_fields) break;
 
-                std::string fld_name = field.value("name", "");
-                std::string fld_type = field.value("type", "");
-                uint32_t fld_offset = field.value("offset", 0);
+            json f;
+            f["name"] = field.name;
+            f["type"] = field.type;
+            f["offset"] = field.offset;
+            std::stringstream ss;
+            ss << "0x" << std::hex << std::uppercase << field.offset;
+            f["offset_hex"] = ss.str();
 
-                json f;
-                f["name"] = fld_name;
-                f["type"] = fld_type;
-                f["offset"] = fld_offset;
-                std::stringstream ss;
-                ss << "0x" << std::hex << std::uppercase << fld_offset;
-                f["offset_hex"] = ss.str();
+            // Read field value using TypeResolver
+            uint64_t field_addr = address + field.offset;
+            size_t read_size = utils::TypeResolver::GetReadSize(field.type);
 
-                // Read field value using TypeResolver
-                uint64_t field_addr = address + fld_offset;
-                size_t read_size = utils::TypeResolver::GetReadSize(fld_type);
-
-                auto data = dma->ReadMemory(pid, field_addr, read_size);
-                if (!data.empty()) {
-                    json interpreted = utils::TypeResolver::Interpret(fld_type, data);
-                    if (!interpreted.is_null()) {
-                        f["value"] = interpreted;
-                    }
+            auto data = dma->ReadMemory(pid, field_addr, read_size);
+            if (!data.empty()) {
+                json interpreted = utils::TypeResolver::Interpret(field.type, data);
+                if (!interpreted.is_null()) {
+                    f["value"] = interpreted;
                 }
-
-                fields_out.push_back(f);
-                field_count++;
             }
+
+            fields_out.push_back(f);
+            field_count++;
         }
 
         result["fields"] = fields_out;
-        result["field_count"] = cached_class.contains("fields") ? cached_class["fields"].size() : 0;
+        result["field_count"] = schema_class->fields.size();
         result["fields_shown"] = field_count;
 
         return CreateSuccessResponse(result.dump());
@@ -1165,6 +1122,87 @@ std::string MCPServer::HandleCS2GetGameState(const std::string& body) {
     } catch (const std::exception& e) {
         return CreateErrorResponse(std::string("Error: ") + e.what());
     }
+}
+
+// ============================================================================
+// In-Memory Schema Cache Helpers
+// ============================================================================
+
+void MCPServer::LoadSchemaIntoMemory() {
+    std::lock_guard<std::mutex> lock(schema_mem_cache_mutex_);
+
+    // Clear existing cache
+    schema_mem_cache_.clear();
+    schema_mem_cache_loaded_ = false;
+
+    namespace fs = std::filesystem;
+    std::string cache_dir = cs2_schema_cache_.GetDirectory();
+
+    if (!fs::exists(cache_dir)) {
+        LOG_WARN("Schema cache directory does not exist: {}", cache_dir);
+        return;
+    }
+
+    size_t class_count = 0;
+    size_t field_count = 0;
+
+    for (const auto& entry : fs::directory_iterator(cache_dir)) {
+        if (entry.path().extension() != ".json") continue;
+
+        std::ifstream in(entry.path());
+        if (!in.is_open()) continue;
+
+        try {
+            json cache_data = json::parse(in);
+            if (!cache_data.contains("classes")) continue;
+
+            std::string scope = cache_data.value("scope", "");
+
+            for (const auto& cls : cache_data["classes"]) {
+                SchemaClassInfo class_info;
+                class_info.name = cls.value("name", "");
+                class_info.scope = scope;
+                class_info.parent = cls.value("base_class", "");
+
+                if (cls.contains("fields")) {
+                    for (const auto& fld : cls["fields"]) {
+                        SchemaFieldInfo field_info;
+                        field_info.name = fld.value("name", "");
+                        field_info.type = fld.value("type", "");
+                        field_info.offset = fld.value("offset", 0);
+                        class_info.fields.push_back(std::move(field_info));
+                        field_count++;
+                    }
+                }
+
+                // Store with lowercase key for case-insensitive lookup
+                std::string key = utils::string_utils::ToLower(class_info.name);
+                schema_mem_cache_[key] = std::move(class_info);
+                class_count++;
+            }
+        } catch (const std::exception& e) {
+            LOG_WARN("Failed to parse schema cache file {}: {}", entry.path().string(), e.what());
+            continue;
+        }
+    }
+
+    schema_mem_cache_loaded_ = true;
+    LOG_INFO("Loaded {} classes with {} fields into memory cache", class_count, field_count);
+}
+
+const MCPServer::SchemaClassInfo* MCPServer::FindSchemaClass(const std::string& class_name) const {
+    std::lock_guard<std::mutex> lock(schema_mem_cache_mutex_);
+
+    if (!schema_mem_cache_loaded_) {
+        return nullptr;
+    }
+
+    std::string key = utils::string_utils::ToLower(class_name);
+    auto it = schema_mem_cache_.find(key);
+    if (it != schema_mem_cache_.end()) {
+        return &it->second;
+    }
+    return nullptr;
 }
 
 } // namespace orpheus::mcp

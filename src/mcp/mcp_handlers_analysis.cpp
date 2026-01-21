@@ -367,7 +367,7 @@ std::string MCPServer::HandleDumpModule(const std::string& body) {
         auto req = json::parse(body);
         uint32_t pid = req["pid"];
         std::string module_name = req["module"];
-        std::string output_path = req.value("output", module_name + ".dump");
+        std::string requested_output = req.value("output", "");
 
         auto* dma = app_->GetDMA();
         if (!dma || !dma->IsConnected()) {
@@ -379,6 +379,37 @@ std::string MCPServer::HandleDumpModule(const std::string& body) {
             return CreateErrorResponse("Module not found: " + module_name);
         }
 
+        // Security: Restrict output to designated dumps directory
+        auto dumps_dir = RuntimeManager::Instance().GetCacheDirectory().parent_path() / "dumps";
+        std::filesystem::create_directories(dumps_dir);
+
+        // Sanitize the filename - only allow alphanumeric, dots, underscores, hyphens
+        std::string safe_filename;
+        std::string base_name = requested_output.empty() ? module_name + ".dump" :
+                                std::filesystem::path(requested_output).filename().string();
+        for (char c : base_name) {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-') {
+                safe_filename += c;
+            } else {
+                safe_filename += '_';
+            }
+        }
+        if (safe_filename.empty()) {
+            safe_filename = "module.dump";
+        }
+
+        // Build final path within dumps directory
+        std::filesystem::path output_path = dumps_dir / safe_filename;
+
+        // Verify the resolved path is still within dumps directory (defense in depth)
+        auto canonical_dumps = std::filesystem::weakly_canonical(dumps_dir);
+        auto canonical_output = std::filesystem::weakly_canonical(output_path);
+        std::string dumps_str = canonical_dumps.string();
+        std::string output_str = canonical_output.string();
+        if (output_str.find(dumps_str) != 0) {
+            return CreateErrorResponse("Invalid output path: must be within dumps directory");
+        }
+
         auto data = dma->ReadMemory(pid, mod_opt->base_address, mod_opt->size);
         if (data.empty()) {
             return CreateErrorResponse("Failed to read module memory");
@@ -386,7 +417,7 @@ std::string MCPServer::HandleDumpModule(const std::string& body) {
 
         std::ofstream file(output_path, std::ios::binary);
         if (!file.is_open()) {
-            return CreateErrorResponse("Failed to open output file: " + output_path);
+            return CreateErrorResponse("Failed to open output file: " + output_path.string());
         }
 
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
@@ -396,7 +427,7 @@ std::string MCPServer::HandleDumpModule(const std::string& body) {
         result["module"] = module_name;
         result["base"] = FormatAddress(mod_opt->base_address);
         result["size"] = mod_opt->size;
-        result["output"] = output_path;
+        result["output"] = output_path.string();
         result["bytes_written"] = data.size();
 
         return CreateSuccessResponse(result.dump());

@@ -96,6 +96,7 @@ bool MCPServer::SaveConfig(const MCPConfig& config, const std::string& filepath)
         j["port"] = config.port;
         j["api_key"] = config.api_key;
         j["require_auth"] = config.require_auth;
+        j["bind_address"] = config.bind_address;
         j["allow_read"] = config.allow_read;
         j["allow_write"] = config.allow_write;
         j["allow_scan"] = config.allow_scan;
@@ -139,6 +140,7 @@ bool MCPServer::LoadConfig(MCPConfig& config, const std::string& filepath) {
         config.port = j.value("port", 8765);
         config.api_key = j.value("api_key", "");
         config.require_auth = j.value("require_auth", true);
+        config.bind_address = j.value("bind_address", "127.0.0.1");
         config.allow_read = j.value("allow_read", true);
         config.allow_write = j.value("allow_write", false);
         config.allow_scan = j.value("allow_scan", true);
@@ -161,7 +163,24 @@ bool MCPServer::ValidateAuth(const std::string& provided_key) const {
         return true;
     }
 
-    return provided_key == config_.api_key;
+    // Constant-time comparison to prevent timing attacks
+    // Always compare full length regardless of where mismatch occurs
+    const std::string& expected = config_.api_key;
+    if (provided_key.size() != expected.size()) {
+        // Still do a dummy comparison to maintain constant time
+        volatile int dummy = 0;
+        for (size_t i = 0; i < expected.size(); i++) {
+            dummy |= expected[i];
+        }
+        (void)dummy;
+        return false;
+    }
+
+    volatile int result = 0;
+    for (size_t i = 0; i < provided_key.size(); i++) {
+        result |= provided_key[i] ^ expected[i];
+    }
+    return result == 0;
 }
 
 void MCPServer::SetConfig(const MCPConfig& config) {
@@ -426,11 +445,12 @@ void MCPServer::SetupRoutes() {
 void MCPServer::ServerThread() {
     auto* server = static_cast<httplib::Server*>(http_server_);
 
-    LOG_INFO("MCP server listening on port {}", config_.port);
+    LOG_INFO("MCP server listening on {}:{}", config_.bind_address, config_.port);
 
-    // Bind to 0.0.0.0 to allow remote connections (e.g., from laptop)
-    if (!server->listen("0.0.0.0", config_.port)) {
-        LOG_ERROR("Failed to start MCP server on port {}", config_.port);
+    // Use configurable bind address (default: 127.0.0.1 for security)
+    // Set to "0.0.0.0" in config to allow remote connections
+    if (!server->listen(config_.bind_address, config_.port)) {
+        LOG_ERROR("Failed to start MCP server on {}:{}", config_.bind_address, config_.port);
         running_.store(false);
     }
 }

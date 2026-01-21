@@ -1,6 +1,7 @@
 #include "application.h"
 #include "core/dma_interface.h"
 #include "core/runtime_manager.h"
+#include "core/task_manager.h"
 #include "utils/logger.h"
 #include "utils/bookmarks.h"
 #include "analysis/disassembler.h"
@@ -10,6 +11,8 @@
 #include "analysis/pe_dumper.h"
 #include "analysis/rtti_parser.h"
 #include "analysis/cfg_builder.h"
+#include "analysis/function_recovery.h"
+#include "analysis/signature.h"
 #include "mcp/mcp_server.h"
 #include "emulation/emulator.h"
 #include "dumper/cs2_schema.h"
@@ -667,6 +670,9 @@ void Application::RegisterKeybinds() {
         {"CS2 Entity Inspector", "Toggle CS2 entity inspector", GLFW_KEY_E, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, [this]() {
             panels_.cs2_entity_inspector = !panels_.cs2_entity_inspector;
         }},
+        {"Function Recovery", "Toggle function recovery panel", GLFW_KEY_F, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, [this]() {
+            panels_.function_recovery = !panels_.function_recovery;
+        }},
     };
 }
 
@@ -899,6 +905,13 @@ void Application::RenderDockspace() {
     if (panels_.cfg_viewer) RenderCFGViewer();
     if (panels_.cs2_radar) RenderCS2Radar();
     if (panels_.cs2_dashboard) RenderCS2Dashboard();
+    if (panels_.pointer_chain) RenderPointerChain();
+    if (panels_.memory_regions) RenderMemoryRegions();
+    if (panels_.function_recovery) RenderFunctionRecovery();
+    if (panels_.xref_finder) RenderXRefFinder();
+    if (panels_.vtable_reader) RenderVTableReader();
+    if (panels_.cache_manager) RenderCacheManager();
+    if (panels_.task_manager) RenderTaskManager();
     if (panels_.console) RenderConsole();
 
     // Dialogs
@@ -960,6 +973,14 @@ void Application::RenderMenuBar() {
             ImGui::MenuItem("RTTI Scanner", "Ctrl+9", &panels_.rtti_scanner);
             ImGui::MenuItem("Bookmarks", "Ctrl+B", &panels_.bookmarks);
             ImGui::MenuItem("Emulator", "Ctrl+8", &panels_.emulator);
+            ImGui::MenuItem("Pointer Chain", nullptr, &panels_.pointer_chain);
+            ImGui::MenuItem("Memory Regions", nullptr, &panels_.memory_regions);
+            ImGui::MenuItem("Function Recovery", "Ctrl+Shift+F", &panels_.function_recovery);
+            ImGui::MenuItem("XRef Finder", "Ctrl+X", &panels_.xref_finder);
+            ImGui::MenuItem("VTable Reader", "Ctrl+V", &panels_.vtable_reader);
+            ImGui::Separator();
+            ImGui::MenuItem("Cache Manager", nullptr, &panels_.cache_manager);
+            ImGui::MenuItem("Task Manager", nullptr, &panels_.task_manager);
             ImGui::Separator();
             if (ImGui::BeginMenu("Game Tools")) {
                 ImGui::MenuItem("CS2 Schema Dumper", "Ctrl+Shift+C", &panels_.cs2_schema);
@@ -1657,6 +1678,15 @@ void Application::RenderDisassembly() {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
                 const auto& instr = disasm_instructions_[i];
 
+                ImGui::PushID(i);
+
+                // Make the entire row selectable for context menu
+                char row_label[128];
+                snprintf(row_label, sizeof(row_label), "%016llX##row", (unsigned long long)instr.address);
+
+                // Calculate approximate row width
+                ImGui::BeginGroup();
+
                 // Address
                 ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%016llX", (unsigned long long)instr.address);
                 ImGui::SameLine();
@@ -1681,6 +1711,62 @@ void Application::RenderDisassembly() {
                 else if (instr.is_ret) instr_color = ImVec4(1.0f, 0.5f, 0.5f, 1.0f);
 
                 ImGui::TextColored(instr_color, "%s", instr.full_text.c_str());
+
+                ImGui::EndGroup();
+
+                // Right-click context menu on the row
+                if (ImGui::BeginPopupContextItem("##disasm_ctx")) {
+                    char addr_buf[32];
+                    snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)instr.address);
+
+                    if (ImGui::MenuItem("Copy Address")) {
+                        ImGui::SetClipboardText(addr_buf);
+                    }
+                    if (ImGui::MenuItem("View in Memory")) {
+                        memory_address_ = instr.address;
+                        snprintf(address_input_, sizeof(address_input_), "%llX", (unsigned long long)instr.address);
+                        memory_data_ = dma_->ReadMemory(selected_pid_, instr.address, 256);
+                        panels_.memory_viewer = true;
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Generate Signature")) {
+                        signature_address_ = instr.address;
+
+                        // Read bytes starting from this address
+                        auto sig_data = dma_->ReadMemory(selected_pid_, instr.address, 128);
+                        if (!sig_data.empty()) {
+                            analysis::SignatureGenerator generator;
+                            analysis::SignatureOptions options;
+                            options.wildcard_rip_relative = true;
+                            options.wildcard_calls = true;
+                            options.wildcard_jumps = true;
+                            options.wildcard_large_immediates = true;
+                            options.min_unique_bytes = 8;
+                            options.max_length = 64;
+
+                            auto sig = generator.Generate(sig_data, instr.address, options);
+
+                            generated_signature_ = sig.pattern;
+                            generated_signature_ida_ = analysis::SignatureGenerator::FormatIDA(sig);
+                            generated_signature_ce_ = analysis::SignatureGenerator::FormatCE(sig);
+                            generated_signature_mask_ = sig.pattern_mask;
+                            generated_signature_length_ = static_cast<int>(sig.length);
+                            generated_signature_unique_ = static_cast<int>(sig.unique_bytes);
+                            generated_signature_ratio_ = sig.uniqueness_ratio;
+                            generated_signature_valid_ = sig.is_valid;
+
+                            show_signature_popup_ = true;
+                        }
+                    }
+                    if (ImGui::MenuItem("Find XRefs to this address")) {
+                        // Pre-fill XRef finder with this address
+                        snprintf(xref_target_input_, sizeof(xref_target_input_), "%llX", (unsigned long long)instr.address);
+                        panels_.xref_finder = true;
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::PopID();
             }
         }
 
@@ -1691,6 +1777,74 @@ void Application::RenderDisassembly() {
     }
 
     ImGui::End();
+
+    // Signature Generator popup dialog
+    if (show_signature_popup_) {
+        ImGui::OpenPopup("Signature Generator");
+        show_signature_popup_ = false;  // Reset flag after opening
+    }
+
+    if (ImGui::BeginPopupModal("Signature Generator", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        // Address header
+        ImGui::Text("Address: 0x%llX", (unsigned long long)signature_address_);
+        ImGui::Separator();
+
+        // Validity indicator
+        if (generated_signature_valid_) {
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), "Valid signature");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Warning: May not be unique enough");
+        }
+        ImGui::Separator();
+
+        // Metrics
+        ImGui::Text("Length: %d bytes | Unique: %d bytes | Ratio: %.1f%%",
+                    generated_signature_length_, generated_signature_unique_,
+                    generated_signature_ratio_ * 100.0f);
+        ImGui::Separator();
+
+        // IDA Pattern
+        ImGui::Text("IDA Pattern:");
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        ImGui::InputText("##ida_pattern", &generated_signature_ida_[0], generated_signature_ida_.size() + 1,
+                         ImGuiInputTextFlags_ReadOnly);
+        if (font_mono_) ImGui::PopFont();
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##ida")) {
+            ImGui::SetClipboardText(generated_signature_ida_.c_str());
+        }
+
+        // CE Pattern
+        ImGui::Text("CE Pattern:");
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        ImGui::InputText("##ce_pattern", &generated_signature_ce_[0], generated_signature_ce_.size() + 1,
+                         ImGuiInputTextFlags_ReadOnly);
+        if (font_mono_) ImGui::PopFont();
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##ce")) {
+            ImGui::SetClipboardText(generated_signature_ce_.c_str());
+        }
+
+        // Mask
+        ImGui::Text("Mask:");
+        if (font_mono_) ImGui::PushFont(font_mono_);
+        ImGui::InputText("##mask", &generated_signature_mask_[0], generated_signature_mask_.size() + 1,
+                         ImGuiInputTextFlags_ReadOnly);
+        if (font_mono_) ImGui::PopFont();
+        ImGui::SameLine();
+        if (ImGui::Button("Copy##mask")) {
+            ImGui::SetClipboardText(generated_signature_mask_.c_str());
+        }
+
+        ImGui::Separator();
+
+        // Close button
+        if (ImGui::Button("Close", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 void Application::RenderDecompiler() {
@@ -6448,6 +6602,2050 @@ void Application::RenderCS2Dashboard() {
         ImGui::PopID();
     }
     ImGui::EndChild();
+
+    ImGui::End();
+}
+
+void Application::RenderMemoryRegions() {
+    ImGui::SetNextWindowSize(ImVec2(900, 500), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Memory Regions", &panels_.memory_regions);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No process selected");
+        ImGui::End();
+        return;
+    }
+
+    // Refresh regions if PID changed
+    if (memory_regions_pid_ != selected_pid_) {
+        cached_memory_regions_ = dma_->GetMemoryRegions(selected_pid_);
+        memory_regions_pid_ = selected_pid_;
+    }
+
+    // Toolbar
+    ImGui::Text("Process: %s (%zu regions)", selected_process_name_.c_str(), cached_memory_regions_.size());
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        cached_memory_regions_ = dma_->GetMemoryRegions(selected_pid_);
+    }
+
+    // Filter input
+    ImGui::SetNextItemWidth(300);
+    ImGui::InputTextWithHint("##regionfilter", "Filter by protection, type, or info...",
+                             memory_regions_filter_, sizeof(memory_regions_filter_));
+
+    ImGui::Separator();
+
+    // Table with memory regions
+    if (ImGui::BeginTable("##MemoryRegionsTable", 5,
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate)) {
+
+        ImGui::TableSetupColumn("Base Address", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, 150.0f);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("Protection", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("Info", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        // Handle sorting
+        if (ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs()) {
+            if (sort_specs->SpecsDirty && sort_specs->SpecsCount > 0) {
+                memory_regions_sort_column_ = sort_specs->Specs[0].ColumnIndex;
+                memory_regions_sort_ascending_ = (sort_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+                sort_specs->SpecsDirty = false;
+            }
+        }
+
+        // Build filtered list
+        std::string filter_str = memory_regions_filter_;
+        std::transform(filter_str.begin(), filter_str.end(), filter_str.begin(), ::tolower);
+
+        std::vector<size_t> filtered_indices;
+        for (size_t i = 0; i < cached_memory_regions_.size(); i++) {
+            if (filter_str.empty()) {
+                filtered_indices.push_back(i);
+            } else {
+                const auto& region = cached_memory_regions_[i];
+                std::string protection_lower = region.protection;
+                std::string type_lower = region.type;
+                std::string info_lower = region.info;
+                std::transform(protection_lower.begin(), protection_lower.end(), protection_lower.begin(), ::tolower);
+                std::transform(type_lower.begin(), type_lower.end(), type_lower.begin(), ::tolower);
+                std::transform(info_lower.begin(), info_lower.end(), info_lower.begin(), ::tolower);
+
+                if (protection_lower.find(filter_str) != std::string::npos ||
+                    type_lower.find(filter_str) != std::string::npos ||
+                    info_lower.find(filter_str) != std::string::npos) {
+                    filtered_indices.push_back(i);
+                }
+            }
+        }
+
+        // Sort filtered indices
+        auto& regions = cached_memory_regions_;
+        int sort_col = memory_regions_sort_column_;
+        bool ascending = memory_regions_sort_ascending_;
+        std::sort(filtered_indices.begin(), filtered_indices.end(),
+            [&regions, sort_col, ascending](size_t a, size_t b) {
+                const auto& ra = regions[a];
+                const auto& rb = regions[b];
+                int cmp = 0;
+                switch (sort_col) {
+                    case 0: cmp = (ra.base_address < rb.base_address) ? -1 : (ra.base_address > rb.base_address) ? 1 : 0; break;
+                    case 1: cmp = (ra.size < rb.size) ? -1 : (ra.size > rb.size) ? 1 : 0; break;
+                    case 2: cmp = ra.protection.compare(rb.protection); break;
+                    case 3: cmp = ra.type.compare(rb.type); break;
+                    case 4: cmp = ra.info.compare(rb.info); break;
+                }
+                return ascending ? (cmp < 0) : (cmp > 0);
+            });
+
+        // Render sorted list with clipper
+        ImGuiListClipper clipper;
+        clipper.Begin((int)filtered_indices.size());
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                const auto& region = cached_memory_regions_[filtered_indices[row]];
+
+                ImGui::TableNextRow();
+
+                // Base Address column
+                ImGui::TableNextColumn();
+                ImGui::PushID((int)filtered_indices[row]);
+                char addr_buf[32];
+                snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)region.base_address);
+                if (ImGui::Selectable(addr_buf, false, ImGuiSelectableFlags_SpanAllColumns)) {
+                    NavigateToAddress(region.base_address);
+                }
+
+                // Context menu
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Copy Address")) {
+                        ImGui::SetClipboardText(addr_buf);
+                    }
+                    if (ImGui::MenuItem("View in Memory")) {
+                        memory_address_ = region.base_address;
+                        snprintf(address_input_, sizeof(address_input_), "0x%llX", (unsigned long long)region.base_address);
+                        memory_data_ = dma_->ReadMemory(selected_pid_, region.base_address, 512);
+                        panels_.memory_viewer = true;
+                    }
+                    if (ImGui::MenuItem("View in Disassembly")) {
+                        disasm_address_ = region.base_address;
+                        snprintf(disasm_address_input_, sizeof(disasm_address_input_), "0x%llX", (unsigned long long)region.base_address);
+                        auto data = dma_->ReadMemory(selected_pid_, region.base_address, 4096);
+                        if (!data.empty() && disassembler_) {
+                            disasm_instructions_ = disassembler_->Disassemble(data, region.base_address);
+                        }
+                        panels_.disassembly = true;
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Copy Size")) {
+                        char size_buf[32];
+                        snprintf(size_buf, sizeof(size_buf), "0x%llX", (unsigned long long)region.size);
+                        ImGui::SetClipboardText(size_buf);
+                    }
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+
+                // Size column
+                ImGui::TableNextColumn();
+                // Format size in a readable way
+                if (region.size >= 1024 * 1024 * 1024) {
+                    ImGui::Text("%.2f GB", region.size / (1024.0 * 1024.0 * 1024.0));
+                } else if (region.size >= 1024 * 1024) {
+                    ImGui::Text("%.2f MB", region.size / (1024.0 * 1024.0));
+                } else if (region.size >= 1024) {
+                    ImGui::Text("%.2f KB", region.size / 1024.0);
+                } else {
+                    ImGui::Text("%llu B", (unsigned long long)region.size);
+                }
+
+                // Protection column with color coding
+                ImGui::TableNextColumn();
+                ImVec4 prot_color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);  // Default gray
+                if (region.protection.find("RWX") != std::string::npos ||
+                    region.protection.find("EXECUTE_READWRITE") != std::string::npos) {
+                    prot_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);  // Red for RWX (suspicious)
+                } else if (region.protection.find("RX") != std::string::npos ||
+                           region.protection.find("EXECUTE") != std::string::npos) {
+                    prot_color = ImVec4(0.3f, 0.8f, 0.3f, 1.0f);  // Green for executable
+                } else if (region.protection.find("RW") != std::string::npos ||
+                           region.protection.find("READWRITE") != std::string::npos) {
+                    prot_color = ImVec4(0.3f, 0.6f, 1.0f, 1.0f);  // Blue for read-write
+                }
+                ImGui::TextColored(prot_color, "%s", region.protection.c_str());
+
+                // Type column
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", region.type.c_str());
+
+                // Info column
+                ImGui::TableNextColumn();
+                ImGui::TextWrapped("%s", region.info.c_str());
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    // Summary statistics at the bottom
+    ImGui::Separator();
+    uint64_t total_size = 0;
+    uint64_t executable_size = 0;
+    uint64_t writable_size = 0;
+    for (const auto& region : cached_memory_regions_) {
+        total_size += region.size;
+        if (region.protection.find("X") != std::string::npos ||
+            region.protection.find("EXECUTE") != std::string::npos) {
+            executable_size += region.size;
+        }
+        if (region.protection.find("W") != std::string::npos ||
+            region.protection.find("WRITE") != std::string::npos) {
+            writable_size += region.size;
+        }
+    }
+    ImGui::Text("Total: %.2f MB | Executable: %.2f MB | Writable: %.2f MB",
+                total_size / (1024.0 * 1024.0),
+                executable_size / (1024.0 * 1024.0),
+                writable_size / (1024.0 * 1024.0));
+
+    ImGui::End();
+}
+
+void Application::RenderXRefFinder() {
+    ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
+    ImGui::Begin("XRef Finder", &panels_.xref_finder);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No process selected");
+        ImGui::End();
+        return;
+    }
+
+    // Target address input
+    ImGui::Text("Find cross-references to:");
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::InputTextWithHint("##xref_target", "Target address (hex)", xref_target_input_, sizeof(xref_target_input_),
+                              ImGuiInputTextFlags_CharsHexadecimal);
+
+    ImGui::Separator();
+
+    // Scan range selection
+    ImGui::Text("Scan Range:");
+    ImGui::Checkbox("Use selected module", &xref_use_module_);
+
+    if (xref_use_module_) {
+        // Module-based scanning
+        if (selected_module_base_ != 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", selected_module_name_.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("@ 0x%llX (0x%X bytes)", (unsigned long long)selected_module_base_, selected_module_size_);
+        } else {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No module selected");
+        }
+    } else {
+        // Custom range
+        ImGui::SetNextItemWidth(200.0f);
+        ImGui::InputTextWithHint("##xref_base", "Base address (hex)", xref_base_input_, sizeof(xref_base_input_),
+                                  ImGuiInputTextFlags_CharsHexadecimal);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::InputTextWithHint("##xref_size", "Size (hex)", xref_size_input_, sizeof(xref_size_input_),
+                                  ImGuiInputTextFlags_CharsHexadecimal);
+    }
+
+    ImGui::Separator();
+
+    // Scan button
+    bool can_scan = false;
+    if (xref_use_module_) {
+        can_scan = selected_module_base_ != 0 && strlen(xref_target_input_) > 0;
+    } else {
+        can_scan = strlen(xref_target_input_) > 0 && strlen(xref_base_input_) > 0 && strlen(xref_size_input_) > 0;
+    }
+
+    if (!can_scan || xref_scanning_) ImGui::BeginDisabled();
+    if (ImGui::Button("Find XRefs")) {
+        xref_scanning_ = true;
+        xref_results_.clear();
+
+        uint64_t target = strtoull(xref_target_input_, nullptr, 16);
+        uint64_t base = 0;
+        uint32_t size = 0;
+
+        if (xref_use_module_) {
+            base = selected_module_base_;
+            size = selected_module_size_;
+        } else {
+            base = strtoull(xref_base_input_, nullptr, 16);
+            size = static_cast<uint32_t>(strtoull(xref_size_input_, nullptr, 16));
+        }
+
+        if (target != 0 && base != 0 && size != 0) {
+            auto data = dma_->ReadMemory(selected_pid_, base, size);
+            if (!data.empty()) {
+                // Scan for direct 64-bit pointer references
+                for (size_t i = 0; i + 8 <= data.size() && xref_results_.size() < 1000; i++) {
+                    uint64_t val = *reinterpret_cast<uint64_t*>(&data[i]);
+                    if (val == target) {
+                        XRefResult ref;
+                        ref.address = base + i;
+                        ref.type = "ptr64";
+
+                        // Build context (module+offset)
+                        bool found_module = false;
+                        for (const auto& mod : cached_modules_) {
+                            if (ref.address >= mod.base_address && ref.address < mod.base_address + mod.size) {
+                                char buf[128];
+                                snprintf(buf, sizeof(buf), "%s+0x%llX", mod.name.c_str(),
+                                         (unsigned long long)(ref.address - mod.base_address));
+                                ref.context = buf;
+                                found_module = true;
+                                break;
+                            }
+                        }
+                        if (!found_module) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)ref.address);
+                            ref.context = buf;
+                        }
+
+                        xref_results_.push_back(ref);
+                    }
+                }
+
+                // Scan for 32-bit relative offsets (RIP-relative)
+                for (size_t i = 0; i + 4 <= data.size() && xref_results_.size() < 1000; i++) {
+                    int32_t rel = *reinterpret_cast<int32_t*>(&data[i]);
+                    uint64_t computed = base + i + 4 + rel;  // RIP + 4 + offset
+                    if (computed == target) {
+                        XRefResult ref;
+                        ref.address = base + i;
+                        ref.type = "rel32";
+
+                        // Build context (module+offset)
+                        bool found_module = false;
+                        for (const auto& mod : cached_modules_) {
+                            if (ref.address >= mod.base_address && ref.address < mod.base_address + mod.size) {
+                                char buf[128];
+                                snprintf(buf, sizeof(buf), "%s+0x%llX", mod.name.c_str(),
+                                         (unsigned long long)(ref.address - mod.base_address));
+                                ref.context = buf;
+                                found_module = true;
+                                break;
+                            }
+                        }
+                        if (!found_module) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)ref.address);
+                            ref.context = buf;
+                        }
+
+                        xref_results_.push_back(ref);
+                    }
+                }
+
+                LOG_INFO("XRef scan found {} references to 0x{:X}", xref_results_.size(), target);
+            }
+        }
+
+        xref_scanning_ = false;
+    }
+    if (!can_scan || xref_scanning_) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) {
+        xref_results_.clear();
+    }
+
+    // Results header
+    ImGui::Separator();
+    ImGui::Text("Results: %zu", xref_results_.size());
+
+    // Results table
+    if (ImGui::BeginTable("##XRefResults", 3,
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Context", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)xref_results_.size());
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                const auto& ref = xref_results_[row];
+
+                ImGui::TableNextRow();
+                ImGui::PushID(row);
+
+                // Address column - clickable
+                ImGui::TableNextColumn();
+                char addr_buf[32];
+                snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)ref.address);
+                if (ImGui::Selectable(addr_buf, false,
+                    ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
+                    if (ImGui::IsMouseDoubleClicked(0)) {
+                        NavigateToAddress(ref.address);
+                    }
+                }
+
+                // Context menu
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("View in Disassembly")) {
+                        disasm_address_ = ref.address;
+                        snprintf(disasm_address_input_, sizeof(disasm_address_input_), "0x%llX", (unsigned long long)ref.address);
+                        auto code = dma_->ReadMemory(selected_pid_, ref.address, 1024);
+                        if (!code.empty() && disassembler_) {
+                            disasm_instructions_ = disassembler_->Disassemble(code, ref.address);
+                        }
+                        panels_.disassembly = true;
+                    }
+                    if (ImGui::MenuItem("View in Memory")) {
+                        memory_address_ = ref.address;
+                        snprintf(address_input_, sizeof(address_input_), "0x%llX", (unsigned long long)ref.address);
+                        memory_data_ = dma_->ReadMemory(selected_pid_, ref.address, 256);
+                        panels_.memory_viewer = true;
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Copy Address")) {
+                        ImGui::SetClipboardText(addr_buf);
+                    }
+                    if (ImGui::MenuItem("Copy Context")) {
+                        ImGui::SetClipboardText(ref.context.c_str());
+                    }
+                    ImGui::EndPopup();
+                }
+
+                // Type column
+                ImGui::TableNextColumn();
+                ImVec4 type_color = ref.type == "ptr64" ?
+                    ImVec4(0.5f, 0.8f, 1.0f, 1.0f) :  // Blue for ptr64
+                    ImVec4(1.0f, 0.8f, 0.5f, 1.0f);   // Orange for rel32
+                ImGui::TextColored(type_color, "%s", ref.type.c_str());
+
+                // Context column
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", ref.context.c_str());
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+}
+
+void Application::RenderPointerChain() {
+    ImGui::SetNextWindowSize(ImVec2(600, 450), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Pointer Chain Resolver", &panels_.pointer_chain);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Select a process first");
+        ImGui::End();
+        return;
+    }
+
+    // Header
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Follow pointer chains to find dynamic addresses");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Input section
+    ImGui::Text("Base Address:");
+    ImGui::SameLine(120);
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputTextWithHint("##ptr_base", "e.g. 7FF600000000", pointer_base_input_, sizeof(pointer_base_input_));
+
+    ImGui::Text("Offsets:");
+    ImGui::SameLine(120);
+    ImGui::SetNextItemWidth(350);
+    ImGui::InputTextWithHint("##ptr_offsets", "e.g. 0x10, 0x20, 0x8 (comma-separated)", pointer_offsets_input_, sizeof(pointer_offsets_input_));
+
+    ImGui::Spacing();
+
+    // Resolve button
+    if (ImGui::Button("Resolve Chain", ImVec2(120, 0))) {
+        pointer_chain_results_.clear();
+        pointer_chain_error_.clear();
+        pointer_final_address_ = 0;
+
+        // Parse base address
+        uint64_t base = 0;
+        try {
+            std::string base_str = pointer_base_input_;
+            // Remove 0x prefix if present
+            if (base_str.length() > 2 && (base_str[0] == '0' && (base_str[1] == 'x' || base_str[1] == 'X'))) {
+                base_str = base_str.substr(2);
+            }
+            base = std::stoull(base_str, nullptr, 16);
+        } catch (...) {
+            pointer_chain_error_ = "Invalid base address";
+        }
+
+        if (pointer_chain_error_.empty() && base == 0) {
+            pointer_chain_error_ = "Base address cannot be 0";
+        }
+
+        // Parse offsets
+        std::vector<int64_t> offsets;
+        if (pointer_chain_error_.empty() && strlen(pointer_offsets_input_) > 0) {
+            std::string offsets_str = pointer_offsets_input_;
+            size_t pos = 0;
+            while (pos < offsets_str.length()) {
+                // Skip whitespace and commas
+                while (pos < offsets_str.length() && (offsets_str[pos] == ' ' || offsets_str[pos] == ',')) {
+                    pos++;
+                }
+                if (pos >= offsets_str.length()) break;
+
+                // Find end of this offset
+                size_t end = pos;
+                while (end < offsets_str.length() && offsets_str[end] != ',' && offsets_str[end] != ' ') {
+                    end++;
+                }
+
+                std::string off_str = offsets_str.substr(pos, end - pos);
+                try {
+                    // Handle negative offsets
+                    bool negative = false;
+                    if (!off_str.empty() && off_str[0] == '-') {
+                        negative = true;
+                        off_str = off_str.substr(1);
+                    }
+                    // Remove 0x prefix if present
+                    if (off_str.length() > 2 && (off_str[0] == '0' && (off_str[1] == 'x' || off_str[1] == 'X'))) {
+                        off_str = off_str.substr(2);
+                    }
+                    int64_t offset = static_cast<int64_t>(std::stoull(off_str, nullptr, 16));
+                    if (negative) offset = -offset;
+                    offsets.push_back(offset);
+                } catch (...) {
+                    pointer_chain_error_ = "Invalid offset: " + off_str;
+                    break;
+                }
+                pos = end;
+            }
+        }
+
+        // Resolve the chain
+        if (pointer_chain_error_.empty()) {
+            uint64_t current = base;
+            pointer_chain_results_.push_back({current, 0});  // Base address (value filled later)
+
+            for (size_t i = 0; i < offsets.size(); i++) {
+                // Read pointer at current address
+                auto ptr_opt = dma_->Read<uint64_t>(selected_pid_, current);
+                if (!ptr_opt) {
+                    pointer_chain_error_ = "Failed to read pointer at 0x" +
+                        ([](uint64_t v) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "%llX", (unsigned long long)v);
+                            return std::string(buf);
+                        })(current);
+                    break;
+                }
+
+                uint64_t ptr_value = *ptr_opt;
+                // Update the value for the current entry
+                pointer_chain_results_.back().second = ptr_value;
+
+                // Apply offset
+                current = ptr_value + offsets[i];
+                pointer_chain_results_.push_back({current, 0});
+            }
+
+            if (pointer_chain_error_.empty()) {
+                pointer_final_address_ = current;
+                // Read value at final address for display
+                auto final_ptr = dma_->Read<uint64_t>(selected_pid_, current);
+                if (final_ptr) {
+                    pointer_chain_results_.back().second = *final_ptr;
+                }
+            }
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear", ImVec2(80, 0))) {
+        pointer_chain_results_.clear();
+        pointer_chain_error_.clear();
+        pointer_final_address_ = 0;
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Enter a base address and comma-separated offsets.\n"
+                          "The resolver will dereference at each step:\n"
+                          "  [[base]+offset1]+offset2 = final address");
+    }
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Error display
+    if (!pointer_chain_error_.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s", pointer_chain_error_.c_str());
+        ImGui::Spacing();
+    }
+
+    // Results display
+    if (!pointer_chain_results_.empty()) {
+        ImGui::Text("Chain Visualization:");
+        ImGui::Separator();
+
+        // Visual chain display
+        ImGui::BeginChild("ChainViz", ImVec2(0, 200), true, ImGuiWindowFlags_HorizontalScrollbar);
+
+        // Parse offsets again for display
+        std::vector<int64_t> offsets;
+        if (strlen(pointer_offsets_input_) > 0) {
+            std::string offsets_str = pointer_offsets_input_;
+            size_t pos = 0;
+            while (pos < offsets_str.length()) {
+                while (pos < offsets_str.length() && (offsets_str[pos] == ' ' || offsets_str[pos] == ',')) pos++;
+                if (pos >= offsets_str.length()) break;
+                size_t end = pos;
+                while (end < offsets_str.length() && offsets_str[end] != ',' && offsets_str[end] != ' ') end++;
+                std::string off_str = offsets_str.substr(pos, end - pos);
+                try {
+                    bool negative = false;
+                    if (!off_str.empty() && off_str[0] == '-') {
+                        negative = true;
+                        off_str = off_str.substr(1);
+                    }
+                    if (off_str.length() > 2 && (off_str[0] == '0' && (off_str[1] == 'x' || off_str[1] == 'X'))) {
+                        off_str = off_str.substr(2);
+                    }
+                    int64_t offset = static_cast<int64_t>(std::stoull(off_str, nullptr, 16));
+                    if (negative) offset = -offset;
+                    offsets.push_back(offset);
+                } catch (...) {}
+                pos = end;
+            }
+        }
+
+        for (size_t i = 0; i < pointer_chain_results_.size(); i++) {
+            const auto& [addr, value] = pointer_chain_results_[i];
+
+            ImGui::PushID(static_cast<int>(i));
+
+            // Step indicator
+            if (i == 0) {
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Base");
+            } else if (i == pointer_chain_results_.size() - 1) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Final");
+            } else {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Step %zu", i);
+            }
+
+            ImGui::SameLine(60);
+
+            // Address (clickable)
+            char addr_buf[32];
+            snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)addr);
+            if (ImGui::Selectable(addr_buf, false, ImGuiSelectableFlags_None, ImVec2(140, 0))) {
+                NavigateToAddress(addr);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Click to navigate to this address in Memory Viewer");
+            }
+
+            // Show dereferenced value (except for the last entry which shows the actual value at final address)
+            if (i < pointer_chain_results_.size() - 1 && value != 0) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "->");
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "[0x%llX]", (unsigned long long)value);
+
+                // Show offset applied
+                if (i < offsets.size()) {
+                    ImGui::SameLine();
+                    if (offsets[i] >= 0) {
+                        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "+ 0x%llX", (unsigned long long)offsets[i]);
+                    } else {
+                        ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.6f, 1.0f), "- 0x%llX", (unsigned long long)(-offsets[i]));
+                    }
+                }
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndChild();
+
+        // Final address section
+        if (pointer_final_address_ != 0) {
+            ImGui::Spacing();
+            ImGui::Separator();
+
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Final Address: 0x%llX", (unsigned long long)pointer_final_address_);
+
+            // Copy button
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy")) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)pointer_final_address_);
+                ImGui::SetClipboardText(buf);
+                status_message_ = "Address copied to clipboard";
+                status_timer_ = 2.0f;
+            }
+
+            ImGui::Spacing();
+
+            // Read final value as different types
+            ImGui::Text("Read Final Value As:");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            const char* type_names[] = { "Int32", "Float", "Int64", "Double" };
+            ImGui::Combo("##ptr_type", &pointer_final_type_, type_names, 4);
+
+            ImGui::SameLine();
+            if (ImGui::Button("Read")) {
+                switch (pointer_final_type_) {
+                    case 0: {  // Int32
+                        auto val = dma_->Read<int32_t>(selected_pid_, pointer_final_address_);
+                        if (val) {
+                            status_message_ = "Int32: " + std::to_string(*val);
+                            status_timer_ = 5.0f;
+                        }
+                        break;
+                    }
+                    case 1: {  // Float
+                        auto val = dma_->Read<float>(selected_pid_, pointer_final_address_);
+                        if (val) {
+                            status_message_ = "Float: " + std::to_string(*val);
+                            status_timer_ = 5.0f;
+                        }
+                        break;
+                    }
+                    case 2: {  // Int64
+                        auto val = dma_->Read<int64_t>(selected_pid_, pointer_final_address_);
+                        if (val) {
+                            status_message_ = "Int64: " + std::to_string(*val);
+                            status_timer_ = 5.0f;
+                        }
+                        break;
+                    }
+                    case 3: {  // Double
+                        auto val = dma_->Read<double>(selected_pid_, pointer_final_address_);
+                        if (val) {
+                            status_message_ = "Double: " + std::to_string(*val);
+                            status_timer_ = 5.0f;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Show last read value inline
+            ImGui::Spacing();
+            ImGui::BeginChild("FinalValueDisplay", ImVec2(0, 60), true);
+
+            // Read and display values at final address
+            auto data = dma_->ReadMemory(selected_pid_, pointer_final_address_, 8);
+            if (!data.empty()) {
+                if (data.size() >= 4) {
+                    int32_t int32_val = *reinterpret_cast<int32_t*>(data.data());
+                    float float_val = *reinterpret_cast<float*>(data.data());
+                    ImGui::Text("Int32: %d  |  Float: %.6f", int32_val, float_val);
+                }
+                if (data.size() >= 8) {
+                    int64_t int64_val = *reinterpret_cast<int64_t*>(data.data());
+                    double double_val = *reinterpret_cast<double*>(data.data());
+                    ImGui::Text("Int64: %lld  |  Double: %.6f", (long long)int64_val, double_val);
+
+                    // Show as hex
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Hex: %02X %02X %02X %02X %02X %02X %02X %02X",
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+                }
+            }
+
+            ImGui::EndChild();
+        }
+    } else if (pointer_chain_error_.empty()) {
+        ImGui::TextDisabled("Enter a base address and offsets, then click 'Resolve Chain'");
+    }
+
+    ImGui::End();
+}
+
+void Application::RenderFunctionRecovery() {
+    ImGui::SetNextWindowSize(ImVec2(1000, 600), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Function Recovery", &panels_.function_recovery);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "No process selected");
+        ImGui::End();
+        return;
+    }
+
+    // Check for async recovery completion
+    if (function_recovery_running_ && function_recovery_future_.valid()) {
+        auto status = function_recovery_future_.wait_for(std::chrono::milliseconds(0));
+        if (status == std::future_status::ready) {
+            auto functions = function_recovery_future_.get();
+            recovered_functions_.clear();
+            recovered_functions_.reserve(functions.size());
+            for (auto& [addr, func] : functions) {
+                recovered_functions_.push_back(std::move(func));
+            }
+            function_recovery_running_ = false;
+            function_recovery_progress_ = 1.0f;
+            function_recovery_progress_stage_ = "Complete";
+            LOG_INFO("Function recovery complete: {} functions found in {}",
+                     recovered_functions_.size(), function_recovery_module_name_);
+        }
+    }
+
+    // Module selector dropdown
+    ImGui::Text("Module:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(300);
+
+    // Display current selection or prompt
+    std::string combo_preview = function_recovery_module_name_.empty()
+        ? "Select a module..."
+        : function_recovery_module_name_;
+
+    if (ImGui::BeginCombo("##ModuleSelector", combo_preview.c_str())) {
+        for (const auto& mod : cached_modules_) {
+            bool is_selected = (mod.base_address == function_recovery_module_base_);
+            std::string label = mod.name + " (" + std::to_string(mod.size / 1024) + " KB)";
+
+            if (ImGui::Selectable(label.c_str(), is_selected)) {
+                function_recovery_module_base_ = mod.base_address;
+                function_recovery_module_size_ = mod.size;
+                function_recovery_module_name_ = mod.name;
+                // Clear previous results when module changes
+                recovered_functions_.clear();
+                function_recovery_progress_ = 0.0f;
+                function_recovery_progress_stage_.clear();
+            }
+
+            if (is_selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // Use selected module button
+    ImGui::SameLine();
+    if (selected_module_base_ != 0) {
+        if (ImGui::Button("Use Selected")) {
+            function_recovery_module_base_ = selected_module_base_;
+            function_recovery_module_size_ = selected_module_size_;
+            function_recovery_module_name_ = selected_module_name_;
+            recovered_functions_.clear();
+            function_recovery_progress_ = 0.0f;
+            function_recovery_progress_stage_.clear();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Use: %s @ 0x%llX", selected_module_name_.c_str(),
+                              (unsigned long long)selected_module_base_);
+        }
+    }
+
+    ImGui::Separator();
+
+    // Recovery options
+    ImGui::Text("Recovery Options:");
+    ImGui::SameLine();
+    ImGui::Checkbox("Prologues", &function_recovery_use_prologues_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Scan for function prologues (push rbp, sub rsp, etc.)");
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Follow calls", &function_recovery_follow_calls_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Mark CALL instruction targets as function entry points");
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Use .pdata", &function_recovery_use_pdata_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Parse PE exception directory for x64 function info");
+    }
+
+    ImGui::SameLine(ImGui::GetWindowWidth() - 180);
+
+    // Recover button
+    bool can_recover = function_recovery_module_base_ != 0 && !function_recovery_running_;
+    if (!can_recover) ImGui::BeginDisabled();
+    if (ImGui::Button("Recover Functions", ImVec2(160, 0))) {
+        function_recovery_running_ = true;
+        function_recovery_progress_ = 0.0f;
+        function_recovery_progress_stage_ = "Starting...";
+        recovered_functions_.clear();
+
+        // Capture necessary state for the async lambda
+        uint32_t pid = selected_pid_;
+        uint64_t module_base = function_recovery_module_base_;
+        uint32_t module_size = function_recovery_module_size_;
+        bool use_prologues = function_recovery_use_prologues_;
+        bool follow_calls = function_recovery_follow_calls_;
+        bool use_pdata = function_recovery_use_pdata_;
+        auto* dma = dma_.get();
+
+        function_recovery_future_ = std::async(std::launch::async,
+            [pid, module_base, module_size, use_prologues, follow_calls, use_pdata, dma,
+             &progress_stage = function_recovery_progress_stage_,
+             &progress = function_recovery_progress_]() -> std::map<uint64_t, analysis::FunctionInfo> {
+
+            analysis::FunctionRecovery recovery(
+                [dma, pid](uint64_t addr, size_t size) {
+                    return dma->ReadMemory(pid, addr, size);
+                },
+                module_base,
+                module_size,
+                true  // is_64bit
+            );
+
+            analysis::FunctionRecoveryOptions opts;
+            opts.use_prologues = use_prologues;
+            opts.follow_calls = follow_calls;
+            opts.use_exception_data = use_pdata;
+            opts.max_functions = 100000;
+
+            return recovery.RecoverFunctions(opts,
+                [&progress_stage, &progress](const std::string& stage, float prog) {
+                    progress_stage = stage;
+                    progress = prog;
+                });
+        });
+    }
+    if (!can_recover) ImGui::EndDisabled();
+
+    // Progress indicator
+    if (function_recovery_running_) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "%s", function_recovery_progress_stage_.c_str());
+        ImGui::ProgressBar(function_recovery_progress_, ImVec2(-1, 0));
+    }
+
+    ImGui::Separator();
+
+    // Results section
+    if (!recovered_functions_.empty()) {
+        // Filter and stats
+        ImGui::Text("Functions: %zu", recovered_functions_.size());
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(200);
+        ImGui::InputTextWithHint("##FuncFilter", "Filter by name or address...",
+                                 function_filter_, sizeof(function_filter_));
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear Results")) {
+            recovered_functions_.clear();
+            function_recovery_progress_ = 0.0f;
+            function_recovery_progress_stage_.clear();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export CSV")) {
+            std::string filename = function_recovery_module_name_ + "_functions.csv";
+            std::ofstream out(filename);
+            if (out.is_open()) {
+                out << "Address,Size,Name,Source,Confidence,IsThunk,IsLeaf\n";
+                for (const auto& func : recovered_functions_) {
+                    out << "0x" << std::hex << func.entry_address << ","
+                        << std::dec << func.size << ","
+                        << "\"" << func.name << "\","
+                        << func.GetSourceString() << ","
+                        << func.confidence << ","
+                        << (func.is_thunk ? "true" : "false") << ","
+                        << (func.is_leaf ? "true" : "false") << "\n";
+                }
+                out.close();
+                LOG_INFO("Exported functions to {}", filename);
+            }
+        }
+
+        // Build filtered list
+        std::string filter_str(function_filter_);
+        std::transform(filter_str.begin(), filter_str.end(), filter_str.begin(), ::tolower);
+
+        std::vector<size_t> filtered_indices;
+        for (size_t i = 0; i < recovered_functions_.size(); i++) {
+            if (filter_str.empty()) {
+                filtered_indices.push_back(i);
+            } else {
+                const auto& func = recovered_functions_[i];
+                // Check name
+                std::string name_lower = func.name;
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+                if (name_lower.find(filter_str) != std::string::npos) {
+                    filtered_indices.push_back(i);
+                    continue;
+                }
+                // Check address as hex
+                char addr_buf[32];
+                snprintf(addr_buf, sizeof(addr_buf), "%llx", (unsigned long long)func.entry_address);
+                if (std::string(addr_buf).find(filter_str) != std::string::npos) {
+                    filtered_indices.push_back(i);
+                }
+            }
+        }
+
+        ImGui::Text("Showing: %zu", filtered_indices.size());
+
+        // Results table
+        const float row_height = ImGui::GetTextLineHeightWithSpacing();
+
+        if (ImGui::BeginTable("##FunctionsTable", 5,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+            ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingFixedFit)) {
+
+            ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort, 140.0f);
+            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn("Flags", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+
+            // Handle sorting
+            if (ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs()) {
+                if (sort_specs->SpecsDirty && sort_specs->SpecsCount > 0) {
+                    function_recovery_sort_column_ = sort_specs->Specs[0].ColumnIndex;
+                    function_recovery_sort_ascending_ = (sort_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+                    sort_specs->SpecsDirty = false;
+                }
+            }
+
+            // Sort filtered indices
+            auto& funcs = recovered_functions_;
+            int sort_col = function_recovery_sort_column_;
+            bool ascending = function_recovery_sort_ascending_;
+            std::sort(filtered_indices.begin(), filtered_indices.end(),
+                [&funcs, sort_col, ascending](size_t a, size_t b) {
+                    const auto& fa = funcs[a];
+                    const auto& fb = funcs[b];
+                    int cmp = 0;
+                    switch (sort_col) {
+                        case 0: cmp = (fa.entry_address < fb.entry_address) ? -1 : (fa.entry_address > fb.entry_address) ? 1 : 0; break;
+                        case 1: cmp = (fa.size < fb.size) ? -1 : (fa.size > fb.size) ? 1 : 0; break;
+                        case 2: cmp = fa.name.compare(fb.name); break;
+                        case 3: cmp = fa.GetSourceString().compare(fb.GetSourceString()); break;
+                        case 4: {
+                            // Sort by flags (thunk, leaf)
+                            int flags_a = (fa.is_thunk ? 2 : 0) + (fa.is_leaf ? 1 : 0);
+                            int flags_b = (fb.is_thunk ? 2 : 0) + (fb.is_leaf ? 1 : 0);
+                            cmp = flags_a - flags_b;
+                            break;
+                        }
+                    }
+                    return ascending ? (cmp < 0) : (cmp > 0);
+                });
+
+            // Render with clipper
+            ImGuiListClipper clipper;
+            clipper.Begin((int)filtered_indices.size(), row_height);
+
+            while (clipper.Step()) {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                    const auto& func = recovered_functions_[filtered_indices[row]];
+
+                    ImGui::TableNextRow(ImGuiTableRowFlags_None, row_height);
+
+                    // Address column
+                    ImGui::TableNextColumn();
+                    ImGui::PushID((int)filtered_indices[row]);
+
+                    char addr_buf[32];
+                    snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)func.entry_address);
+
+                    if (ImGui::Selectable(addr_buf, false,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            // Double-click to decompile
+#ifdef ORPHEUS_HAS_GHIDRA_DECOMPILER
+                            decompile_address_ = func.entry_address;
+                            snprintf(decompile_address_input_, sizeof(decompile_address_input_),
+                                     "0x%llX", (unsigned long long)func.entry_address);
+                            panels_.decompiler = true;
+#else
+                            // Navigate to disassembly
+                            NavigateToAddress(func.entry_address);
+#endif
+                        }
+                    }
+
+                    // Context menu
+                    if (ImGui::BeginPopupContextItem("##FuncContext")) {
+                        if (ImGui::MenuItem("Copy Address")) {
+                            ImGui::SetClipboardText(addr_buf);
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("View in Disassembly")) {
+                            disasm_address_ = func.entry_address;
+                            snprintf(disasm_address_input_, sizeof(disasm_address_input_),
+                                     "0x%llX", (unsigned long long)func.entry_address);
+                            auto data = dma_->ReadMemory(selected_pid_, func.entry_address, 4096);
+                            if (!data.empty() && disassembler_) {
+                                disasm_instructions_ = disassembler_->Disassemble(data, func.entry_address);
+                            }
+                            panels_.disassembly = true;
+                        }
+                        if (ImGui::MenuItem("View in Memory")) {
+                            memory_address_ = func.entry_address;
+                            snprintf(address_input_, sizeof(address_input_),
+                                     "0x%llX", (unsigned long long)func.entry_address);
+                            memory_data_ = dma_->ReadMemory(selected_pid_, func.entry_address, 512);
+                            panels_.memory_viewer = true;
+                        }
+#ifdef ORPHEUS_HAS_GHIDRA_DECOMPILER
+                        if (ImGui::MenuItem("Decompile")) {
+                            decompile_address_ = func.entry_address;
+                            snprintf(decompile_address_input_, sizeof(decompile_address_input_),
+                                     "0x%llX", (unsigned long long)func.entry_address);
+                            panels_.decompiler = true;
+                        }
+#endif
+                        if (ImGui::MenuItem("Build CFG")) {
+                            cfg_function_addr_ = func.entry_address;
+                            snprintf(cfg_address_input_, sizeof(cfg_address_input_),
+                                     "0x%llX", (unsigned long long)func.entry_address);
+                            panels_.cfg_viewer = true;
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Add Bookmark")) {
+                            if (bookmarks_) {
+                                std::string label = func.name.empty() ?
+                                    "func_" + std::string(addr_buf) : func.name;
+                                bookmarks_->Add(func.entry_address, label, "",
+                                               "Functions", function_recovery_module_name_);
+                            }
+                        }
+                        ImGui::EndPopup();
+                    }
+
+                    // Tooltip with details
+                    if (ImGui::IsItemHovered()) {
+                        uint64_t offset = func.entry_address - function_recovery_module_base_;
+                        ImGui::BeginTooltip();
+                        ImGui::Text("%s+0x%llX", function_recovery_module_name_.c_str(), (unsigned long long)offset);
+                        if (!func.name.empty()) {
+                            ImGui::Text("Name: %s", func.name.c_str());
+                        }
+                        ImGui::Text("Confidence: %.1f%%", func.confidence * 100.0f);
+                        ImGui::Text("Instructions: %u, Blocks: %u", func.instruction_count, func.basic_block_count);
+                        ImGui::TextDisabled("Double-click to decompile, Right-click for options");
+                        ImGui::EndTooltip();
+                    }
+
+                    ImGui::PopID();
+
+                    // Size column
+                    ImGui::TableNextColumn();
+                    if (func.size > 0) {
+                        ImGui::Text("%u", func.size);
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+
+                    // Name column
+                    ImGui::TableNextColumn();
+                    if (!func.name.empty()) {
+                        ImGui::TextUnformatted(func.name.c_str());
+                    } else {
+                        ImGui::TextDisabled("(unnamed)");
+                    }
+
+                    // Source column with color coding
+                    ImGui::TableNextColumn();
+                    std::string src = func.GetSourceString();
+                    ImVec4 src_color;
+                    if (src == "pdata") {
+                        src_color = ImVec4(0.3f, 0.9f, 0.3f, 1.0f);  // Green - most reliable
+                    } else if (src == "prologue") {
+                        src_color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);  // Blue
+                    } else if (src == "call_target") {
+                        src_color = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);  // Yellow
+                    } else if (src == "rtti") {
+                        src_color = ImVec4(0.8f, 0.5f, 1.0f, 1.0f);  // Purple
+                    } else {
+                        src_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);  // Gray
+                    }
+                    ImGui::TextColored(src_color, "%s", src.c_str());
+
+                    // Flags column
+                    ImGui::TableNextColumn();
+                    std::string flags;
+                    if (func.is_thunk) flags += "T";
+                    if (func.is_leaf) flags += "L";
+                    if (!flags.empty()) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", flags.c_str());
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("T=Thunk (jump to another function)\nL=Leaf (no calls to other functions)");
+                        }
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+                }
+            }
+
+            ImGui::EndTable();
+        }
+    } else if (!function_recovery_running_ && function_recovery_module_base_ != 0) {
+        ImGui::TextDisabled("Select a module and click 'Recover Functions' to discover functions");
+    }
+
+    ImGui::Separator();
+
+    // Find Function Containing feature
+    ImGui::Text("Find Function Containing Address:");
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::InputText("##ContainingAddr", function_containing_input_, sizeof(function_containing_input_),
+                         ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue)) {
+        uint64_t target_addr = strtoull(function_containing_input_, nullptr, 16);
+        if (target_addr != 0 && !recovered_functions_.empty()) {
+            // Find the function containing this address
+            function_containing_result_addr_ = 0;
+            function_containing_result_name_.clear();
+
+            // Sort functions by address for binary-search-like behavior
+            std::vector<const analysis::FunctionInfo*> sorted_funcs;
+            sorted_funcs.reserve(recovered_functions_.size());
+            for (const auto& func : recovered_functions_) {
+                sorted_funcs.push_back(&func);
+            }
+            std::sort(sorted_funcs.begin(), sorted_funcs.end(),
+                [](const analysis::FunctionInfo* a, const analysis::FunctionInfo* b) {
+                    return a->entry_address < b->entry_address;
+                });
+
+            // Find the largest entry_address <= target_addr
+            for (auto it = sorted_funcs.rbegin(); it != sorted_funcs.rend(); ++it) {
+                if ((*it)->entry_address <= target_addr) {
+                    if ((*it)->size > 0 && target_addr >= (*it)->entry_address + (*it)->size) {
+                        // Address is past the end of this function
+                        continue;
+                    }
+                    function_containing_result_addr_ = (*it)->entry_address;
+                    function_containing_result_name_ = (*it)->name;
+                    break;
+                }
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Find")) {
+        uint64_t target_addr = strtoull(function_containing_input_, nullptr, 16);
+        if (target_addr != 0 && !recovered_functions_.empty()) {
+            function_containing_result_addr_ = 0;
+            function_containing_result_name_.clear();
+
+            // Sort functions by address for binary-search-like behavior
+            std::vector<const analysis::FunctionInfo*> sorted_funcs;
+            sorted_funcs.reserve(recovered_functions_.size());
+            for (const auto& func : recovered_functions_) {
+                sorted_funcs.push_back(&func);
+            }
+            std::sort(sorted_funcs.begin(), sorted_funcs.end(),
+                [](const analysis::FunctionInfo* a, const analysis::FunctionInfo* b) {
+                    return a->entry_address < b->entry_address;
+                });
+
+            // Find the largest entry_address <= target_addr
+            for (auto it = sorted_funcs.rbegin(); it != sorted_funcs.rend(); ++it) {
+                if ((*it)->entry_address <= target_addr) {
+                    if ((*it)->size > 0 && target_addr >= (*it)->entry_address + (*it)->size) {
+                        // Address is past the end of this function
+                        continue;
+                    }
+                    function_containing_result_addr_ = (*it)->entry_address;
+                    function_containing_result_name_ = (*it)->name;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Show result
+    if (function_containing_result_addr_ != 0) {
+        ImGui::SameLine();
+        ImGui::Text("->");
+        ImGui::SameLine();
+        char result_buf[64];
+        snprintf(result_buf, sizeof(result_buf), "0x%llX", (unsigned long long)function_containing_result_addr_);
+        if (ImGui::SmallButton(result_buf)) {
+            NavigateToAddress(function_containing_result_addr_);
+        }
+        if (!function_containing_result_name_.empty()) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(%s)", function_containing_result_name_.c_str());
+        }
+        uint64_t target = strtoull(function_containing_input_, nullptr, 16);
+        if (target > function_containing_result_addr_) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("+0x%llX", (unsigned long long)(target - function_containing_result_addr_));
+        }
+    }
+
+    ImGui::End();
+}
+
+void Application::RenderVTableReader() {
+    ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
+    ImGui::Begin("VTable Reader", &panels_.vtable_reader);
+
+    if (!dma_ || !dma_->IsConnected()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "DMA not connected");
+        ImGui::End();
+        return;
+    }
+
+    if (selected_pid_ == 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Select a process first");
+        ImGui::End();
+        return;
+    }
+
+    // Header
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Read VTable entries and identify classes via RTTI");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Input section
+    ImGui::Text("VTable Address:");
+    ImGui::SameLine(130);
+    ImGui::SetNextItemWidth(200);
+    bool enter_pressed = ImGui::InputTextWithHint("##vtable_addr", "e.g. 7FF600123456",
+        vtable_address_input_, sizeof(vtable_address_input_),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+
+    ImGui::Text("Entry Count:");
+    ImGui::SameLine(130);
+    ImGui::SetNextItemWidth(100);
+    ImGui::InputInt("##vtable_count", &vtable_entry_count_);
+    vtable_entry_count_ = std::max(1, std::min(vtable_entry_count_, 500));
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Disassemble", &vtable_disasm_);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Show first instruction of each function");
+    }
+
+    ImGui::Spacing();
+
+    // Read button
+    if (ImGui::Button("Read VTable", ImVec2(120, 0)) || enter_pressed) {
+        vtable_entries_.clear();
+        vtable_class_name_.clear();
+        vtable_error_.clear();
+
+        uint64_t vtable_addr = 0;
+        try {
+            vtable_addr = std::stoull(vtable_address_input_, nullptr, 16);
+        } catch (...) {
+            vtable_error_ = "Invalid vtable address";
+        }
+
+        if (vtable_addr != 0) {
+            // Read vtable entries
+            size_t read_size = vtable_entry_count_ * 8;  // 8 bytes per pointer
+            auto vtable_data = dma_->ReadMemory(selected_pid_, vtable_addr, read_size);
+
+            if (vtable_data.empty()) {
+                vtable_error_ = "Failed to read memory at vtable address";
+            } else {
+                // Parse entries
+                for (int i = 0; i < vtable_entry_count_ && (size_t)((i + 1) * 8) <= vtable_data.size(); i++) {
+                    VTableEntry entry;
+                    entry.address = vtable_addr + i * 8;
+                    entry.function = *reinterpret_cast<uint64_t*>(&vtable_data[i * 8]);
+
+                    // Check if function pointer looks valid (non-zero, reasonable range)
+                    entry.valid = (entry.function > 0x10000 && entry.function < 0x00007FFFFFFFFFFF);
+
+                    // Build context (module+offset)
+                    if (entry.valid) {
+                        bool found_module = false;
+                        for (const auto& mod : cached_modules_) {
+                            if (entry.function >= mod.base_address && entry.function < mod.base_address + mod.size) {
+                                char buf[128];
+                                snprintf(buf, sizeof(buf), "%s+0x%llX", mod.name.c_str(),
+                                         (unsigned long long)(entry.function - mod.base_address));
+                                entry.context = buf;
+                                found_module = true;
+                                break;
+                            }
+                        }
+                        if (!found_module) {
+                            entry.context = "(outside modules)";
+                        }
+
+                        // Optionally disassemble first instruction
+                        if (vtable_disasm_ && disassembler_) {
+                            auto code = dma_->ReadMemory(selected_pid_, entry.function, 32);
+                            if (!code.empty()) {
+                                auto instrs = disassembler_->Disassemble(code, entry.function);
+                                if (!instrs.empty()) {
+                                    entry.first_instr = instrs[0].mnemonic + " " + instrs[0].operands;
+                                }
+                            }
+                        }
+                    }
+
+                    vtable_entries_.push_back(entry);
+                }
+
+                // Try to identify class via RTTI (vtable[-1] points to RTTI type info)
+                uint64_t rtti_ptr_addr = vtable_addr - 8;
+                auto rtti_ptr_opt = dma_->Read<uint64_t>(selected_pid_, rtti_ptr_addr);
+                if (rtti_ptr_opt && *rtti_ptr_opt != 0) {
+                    // Parse RTTI - read type descriptor
+                    uint64_t type_descriptor = *rtti_ptr_opt;
+
+                    // In MSVC RTTI, the type name is at type_descriptor + 16 (after hash values)
+                    // The name is a decorated string like ".?AVClassName@@"
+                    auto name_data = dma_->ReadMemory(selected_pid_, type_descriptor + 16, 256);
+                    if (!name_data.empty()) {
+                        // Find null-terminated string
+                        std::string decorated;
+                        for (uint8_t c : name_data) {
+                            if (c == 0) break;
+                            decorated += static_cast<char>(c);
+                        }
+
+                        // Simple demangling: .?AVClassName@@ -> ClassName
+                        if (decorated.size() > 4 && decorated.substr(0, 4) == ".?AV") {
+                            size_t end = decorated.find("@@");
+                            if (end != std::string::npos) {
+                                vtable_class_name_ = decorated.substr(4, end - 4);
+                            }
+                        } else if (decorated.size() > 4 && decorated.substr(0, 4) == ".?AU") {
+                            // struct
+                            size_t end = decorated.find("@@");
+                            if (end != std::string::npos) {
+                                vtable_class_name_ = decorated.substr(4, end - 4);
+                            }
+                        } else if (!decorated.empty() && decorated[0] != '.') {
+                            vtable_class_name_ = decorated;
+                        }
+                    }
+                }
+
+                LOG_INFO("VTable read: {} entries from 0x{:X}, class: {}",
+                         vtable_entries_.size(), vtable_addr,
+                         vtable_class_name_.empty() ? "(unknown)" : vtable_class_name_);
+            }
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear")) {
+        vtable_entries_.clear();
+        vtable_class_name_.clear();
+        vtable_error_.clear();
+    }
+
+    // Error display
+    if (!vtable_error_.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Error: %s", vtable_error_.c_str());
+    }
+
+    // Class name display
+    if (!vtable_class_name_.empty()) {
+        ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "RTTI Class: %s", vtable_class_name_.c_str());
+    }
+
+    // Results header
+    ImGui::Separator();
+    ImGui::Text("Entries: %zu", vtable_entries_.size());
+
+    // Results table
+    int num_cols = vtable_disasm_ ? 5 : 4;
+    if (ImGui::BeginTable("##VTableEntries", num_cols,
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+
+        ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+        ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("Context", ImGuiTableColumnFlags_WidthStretch);
+        if (vtable_disasm_) {
+            ImGui::TableSetupColumn("First Instr", ImGuiTableColumnFlags_WidthStretch);
+        }
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)vtable_entries_.size());
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                const auto& entry = vtable_entries_[row];
+
+                ImGui::TableNextRow();
+                ImGui::PushID(row);
+
+                // Index column
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", row);
+
+                // Address column
+                ImGui::TableNextColumn();
+                char addr_buf[32];
+                snprintf(addr_buf, sizeof(addr_buf), "0x%llX", (unsigned long long)entry.address);
+                ImGui::TextDisabled("%s", addr_buf);
+
+                // Function column - clickable if valid
+                ImGui::TableNextColumn();
+                if (entry.valid) {
+                    char func_buf[32];
+                    snprintf(func_buf, sizeof(func_buf), "0x%llX", (unsigned long long)entry.function);
+                    if (ImGui::Selectable(func_buf, false,
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick)) {
+                        if (ImGui::IsMouseDoubleClicked(0)) {
+                            NavigateToAddress(entry.function);
+                        }
+                    }
+
+                    // Context menu
+                    if (ImGui::BeginPopupContextItem()) {
+                        if (ImGui::MenuItem("View in Disassembly")) {
+                            disasm_address_ = entry.function;
+                            snprintf(disasm_address_input_, sizeof(disasm_address_input_), "0x%llX",
+                                     (unsigned long long)entry.function);
+                            auto code = dma_->ReadMemory(selected_pid_, entry.function, 1024);
+                            if (!code.empty() && disassembler_) {
+                                disasm_instructions_ = disassembler_->Disassemble(code, entry.function);
+                            }
+                            panels_.disassembly = true;
+                        }
+                        if (ImGui::MenuItem("View in Memory")) {
+                            memory_address_ = entry.function;
+                            snprintf(address_input_, sizeof(address_input_), "0x%llX",
+                                     (unsigned long long)entry.function);
+                            memory_data_ = dma_->ReadMemory(selected_pid_, entry.function, 256);
+                            panels_.memory_viewer = true;
+                        }
+                        #ifdef ORPHEUS_HAS_GHIDRA_DECOMPILER
+                        if (ImGui::MenuItem("Decompile")) {
+                            decompile_address_ = entry.function;
+                            snprintf(decompile_address_input_, sizeof(decompile_address_input_), "0x%llX",
+                                     (unsigned long long)entry.function);
+                            panels_.decompiler = true;
+                        }
+                        #endif
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Copy Address")) {
+                            ImGui::SetClipboardText(func_buf);
+                        }
+                        if (ImGui::MenuItem("Add Bookmark")) {
+                            std::string label = vtable_class_name_.empty() ?
+                                "vtable[" + std::to_string(row) + "]" :
+                                vtable_class_name_ + "::vfunc" + std::to_string(row);
+                            bookmarks_->Add(entry.function, label, "", "VTable");
+                        }
+                        ImGui::EndPopup();
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "0x%llX (invalid)",
+                                       (unsigned long long)entry.function);
+                }
+
+                // Context column
+                ImGui::TableNextColumn();
+                if (entry.valid) {
+                    ImGui::Text("%s", entry.context.c_str());
+                } else {
+                    ImGui::TextDisabled("-");
+                }
+
+                // First instruction column
+                if (vtable_disasm_) {
+                    ImGui::TableNextColumn();
+                    if (!entry.first_instr.empty()) {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "%s", entry.first_instr.c_str());
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+                }
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::End();
+}
+
+void Application::RenderCacheManager() {
+    ImGui::SetNextWindowSize(ImVec2(700, 500), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Cache Manager", &panels_.cache_manager);
+
+    // Header
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Manage cached analysis data (RTTI, Schema, Functions)");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Filter section
+    ImGui::Text("Type:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150);
+    const char* type_items[] = { "All", "RTTI", "Schema", "Functions" };
+    if (ImGui::Combo("##cache_type", &cache_selected_type_, type_items, 4)) {
+        cache_needs_refresh_ = true;
+    }
+
+    ImGui::SameLine();
+    ImGui::Text("Filter:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::InputTextWithHint("##cache_filter", "Search...", cache_filter_, sizeof(cache_filter_))) {
+        cache_needs_refresh_ = true;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        cache_needs_refresh_ = true;
+    }
+
+    // Refresh cache list if needed
+    if (cache_needs_refresh_) {
+        cache_entries_.clear();
+        cache_needs_refresh_ = false;
+
+        auto cache_base = RuntimeManager::Instance().GetCacheDirectory();
+
+        // Helper to scan a cache directory
+        auto scan_cache_dir = [&](const std::string& subdir, const std::string& type) {
+            auto dir_path = cache_base / subdir;
+            if (!std::filesystem::exists(dir_path)) return;
+
+            for (const auto& entry : std::filesystem::directory_iterator(dir_path)) {
+                if (!entry.is_regular_file()) continue;
+
+                std::string name = entry.path().filename().string();
+                std::string filter_lower = cache_filter_;
+                std::string name_lower = name;
+                std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
+                std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+                // Apply type filter
+                if (cache_selected_type_ != 0) {
+                    if ((cache_selected_type_ == 1 && type != "rtti") ||
+                        (cache_selected_type_ == 2 && type != "schema") ||
+                        (cache_selected_type_ == 3 && type != "functions")) {
+                        continue;
+                    }
+                }
+
+                // Apply text filter
+                if (!filter_lower.empty() && name_lower.find(filter_lower) == std::string::npos) {
+                    continue;
+                }
+
+                CacheEntry ce;
+                ce.name = name;
+                ce.path = entry.path().string();
+                ce.size = entry.file_size();
+                ce.type = type;
+
+                // Format modification time
+                auto ftime = std::filesystem::last_write_time(entry);
+                auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                    ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()
+                );
+                auto time_t_val = std::chrono::system_clock::to_time_t(sctp);
+                std::tm tm_val;
+                #ifdef _WIN32
+                localtime_s(&tm_val, &time_t_val);
+                #else
+                localtime_r(&time_t_val, &tm_val);
+                #endif
+                char time_buf[64];
+                std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M", &tm_val);
+                ce.modified = time_buf;
+
+                cache_entries_.push_back(ce);
+            }
+        };
+
+        // Scan all cache directories
+        scan_cache_dir("rtti", "rtti");
+        scan_cache_dir("cs2_schema", "schema");
+        scan_cache_dir("functions", "functions");
+
+        // Sort by modification time (newest first)
+        std::sort(cache_entries_.begin(), cache_entries_.end(),
+            [](const CacheEntry& a, const CacheEntry& b) {
+                return a.modified > b.modified;
+            });
+    }
+
+    // Stats
+    size_t total_size = 0;
+    for (const auto& entry : cache_entries_) {
+        total_size += entry.size;
+    }
+    ImGui::Text("Files: %zu | Total: %.2f MB", cache_entries_.size(), total_size / (1024.0 * 1024.0));
+
+    ImGui::Separator();
+
+    // Cache table
+    if (ImGui::BeginTable("##CacheEntries", 5,
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_Sortable)) {
+
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)cache_entries_.size());
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++) {
+                const auto& entry = cache_entries_[row];
+
+                ImGui::TableNextRow();
+                ImGui::PushID(row);
+
+                // Name column
+                ImGui::TableNextColumn();
+                ImGui::Text("%s", entry.name.c_str());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", entry.path.c_str());
+                }
+
+                // Type column
+                ImGui::TableNextColumn();
+                ImVec4 type_color;
+                if (entry.type == "rtti") {
+                    type_color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);  // Blue
+                } else if (entry.type == "schema") {
+                    type_color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);  // Green
+                } else {
+                    type_color = ImVec4(1.0f, 0.8f, 0.5f, 1.0f);  // Orange
+                }
+                ImGui::TextColored(type_color, "%s", entry.type.c_str());
+
+                // Size column
+                ImGui::TableNextColumn();
+                if (entry.size >= 1024 * 1024) {
+                    ImGui::Text("%.1f MB", entry.size / (1024.0 * 1024.0));
+                } else if (entry.size >= 1024) {
+                    ImGui::Text("%.1f KB", entry.size / 1024.0);
+                } else {
+                    ImGui::Text("%zu B", entry.size);
+                }
+
+                // Modified column
+                ImGui::TableNextColumn();
+                ImGui::TextDisabled("%s", entry.modified.c_str());
+
+                // Actions column
+                ImGui::TableNextColumn();
+                if (ImGui::SmallButton("Delete")) {
+                    ImGui::OpenPopup("Confirm Delete");
+                }
+
+                // Confirm delete popup
+                if (ImGui::BeginPopupModal("Confirm Delete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Delete cache file '%s'?", entry.name.c_str());
+                    ImGui::Spacing();
+
+                    if (ImGui::Button("Delete", ImVec2(80, 0))) {
+                        std::error_code ec;
+                        std::filesystem::remove(entry.path, ec);
+                        if (!ec) {
+                            LOG_INFO("Deleted cache file: {}", entry.path);
+                            cache_needs_refresh_ = true;
+                        } else {
+                            LOG_ERROR("Failed to delete: {}", ec.message());
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    // Bulk actions
+    ImGui::Separator();
+    if (ImGui::Button("Clear All RTTI Cache")) {
+        auto dir_path = RuntimeManager::Instance().GetCacheDirectory() / "rtti";
+        if (std::filesystem::exists(dir_path)) {
+            std::error_code ec;
+            size_t count = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(dir_path)) {
+                std::filesystem::remove(entry.path(), ec);
+                if (!ec) count++;
+            }
+            LOG_INFO("Cleared {} RTTI cache files", count);
+            cache_needs_refresh_ = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear All Schema Cache")) {
+        auto dir_path = RuntimeManager::Instance().GetCacheDirectory() / "cs2_schema";
+        if (std::filesystem::exists(dir_path)) {
+            std::error_code ec;
+            size_t count = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(dir_path)) {
+                std::filesystem::remove(entry.path(), ec);
+                if (!ec) count++;
+            }
+            LOG_INFO("Cleared {} Schema cache files", count);
+            cache_needs_refresh_ = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear All Function Cache")) {
+        auto dir_path = RuntimeManager::Instance().GetCacheDirectory() / "functions";
+        if (std::filesystem::exists(dir_path)) {
+            std::error_code ec;
+            size_t count = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(dir_path)) {
+                std::filesystem::remove(entry.path(), ec);
+                if (!ec) count++;
+            }
+            LOG_INFO("Cleared {} Function cache files", count);
+            cache_needs_refresh_ = true;
+        }
+    }
+
+    ImGui::End();
+}
+
+void Application::RenderTaskManager() {
+    ImGui::SetNextWindowSize(ImVec2(800, 500), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Task Manager", &panels_.task_manager);
+
+    auto& tm = core::TaskManager::Instance();
+    auto counts = tm.GetTaskCounts();
+
+    // Header with counts
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Background Tasks");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(Running: %zu, Pending: %zu, Completed: %zu, Failed: %zu)",
+        counts.running, counts.pending, counts.completed, counts.failed);
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Controls
+    ImGui::Text("Filter:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120);
+    const char* filter_items[] = { "All", "Running", "Completed", "Failed" };
+    ImGui::Combo("##task_filter", &task_filter_status_, filter_items, 4);
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto-refresh", &task_list_auto_refresh_);
+
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        task_refresh_timer_ = task_refresh_interval_;  // Force immediate refresh
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Cleanup Old")) {
+        tm.CleanupTasks(std::chrono::seconds(60));  // Remove tasks older than 1 minute
+        LOG_INFO("Cleaned up old tasks");
+    }
+
+    // Auto-refresh logic
+    if (task_list_auto_refresh_) {
+        task_refresh_timer_ += ImGui::GetIO().DeltaTime;
+        if (task_refresh_timer_ >= task_refresh_interval_) {
+            task_refresh_timer_ = 0.0f;
+            // Refresh is automatic via ListTasks call below
+        }
+    }
+
+    // Get task list with optional filter
+    std::optional<core::TaskState> state_filter;
+    if (task_filter_status_ == 1) state_filter = core::TaskState::Running;
+    else if (task_filter_status_ == 2) state_filter = core::TaskState::Completed;
+    else if (task_filter_status_ == 3) state_filter = core::TaskState::Failed;
+
+    auto tasks = tm.ListTasks(state_filter);
+
+    ImGui::Separator();
+    ImGui::Text("Tasks: %zu", tasks.size());
+
+    // Task table
+    if (ImGui::BeginTable("##TaskTable", 6,
+        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY)) {
+
+        ImGui::TableSetupColumn("ID", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("Progress", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("Message", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+
+        for (size_t i = 0; i < tasks.size(); i++) {
+            const auto& task = tasks[i];
+
+            ImGui::TableNextRow();
+            ImGui::PushID(static_cast<int>(i));
+
+            // ID column
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", task.id.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Task ID: %s\nDescription: %s",
+                    task.id.c_str(), task.description.c_str());
+            }
+
+            // Type column
+            ImGui::TableNextColumn();
+            ImGui::Text("%s", task.type.c_str());
+
+            // Status column
+            ImGui::TableNextColumn();
+            ImVec4 status_color;
+            switch (task.state) {
+                case core::TaskState::Pending:
+                    status_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);  // Gray
+                    break;
+                case core::TaskState::Running:
+                    status_color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);  // Blue
+                    break;
+                case core::TaskState::Completed:
+                    status_color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);  // Green
+                    break;
+                case core::TaskState::Failed:
+                    status_color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);  // Red
+                    break;
+                case core::TaskState::Cancelled:
+                    status_color = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);  // Yellow
+                    break;
+            }
+            ImGui::TextColored(status_color, "%s", core::TaskStateToString(task.state).c_str());
+
+            // Progress column
+            ImGui::TableNextColumn();
+            if (task.state == core::TaskState::Running || task.state == core::TaskState::Pending) {
+                ImGui::ProgressBar(task.progress, ImVec2(-1, 0),
+                    task.progress > 0 ? nullptr : "...");
+            } else if (task.state == core::TaskState::Completed) {
+                ImGui::ProgressBar(1.0f, ImVec2(-1, 0), "Done");
+            } else if (task.state == core::TaskState::Failed) {
+                ImGui::ProgressBar(task.progress, ImVec2(-1, 0), "Failed");
+            } else {
+                ImGui::ProgressBar(task.progress, ImVec2(-1, 0), "Cancelled");
+            }
+
+            // Message column
+            ImGui::TableNextColumn();
+            if (!task.status_message.empty()) {
+                ImGui::Text("%s", task.status_message.c_str());
+            } else if (task.error) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", task.error->c_str());
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            // Actions column
+            ImGui::TableNextColumn();
+            if (task.state == core::TaskState::Running || task.state == core::TaskState::Pending) {
+                if (ImGui::SmallButton("Cancel")) {
+                    if (tm.CancelTask(task.id)) {
+                        LOG_INFO("Cancelled task: {}", task.id);
+                    }
+                }
+            } else {
+                // Show result preview for completed tasks
+                if (task.state == core::TaskState::Completed && task.result) {
+                    if (ImGui::SmallButton("View")) {
+                        ImGui::OpenPopup("Task Result");
+                    }
+
+                    if (ImGui::BeginPopup("Task Result")) {
+                        ImGui::Text("Task: %s (%s)", task.type.c_str(), task.id.c_str());
+                        ImGui::Separator();
+
+                        // Show result summary
+                        std::string result_str = task.result->dump(2);
+                        if (result_str.length() > 2000) {
+                            result_str = result_str.substr(0, 2000) + "\n... (truncated)";
+                        }
+                        ImGui::TextWrapped("%s", result_str.c_str());
+
+                        if (ImGui::Button("Copy")) {
+                            ImGui::SetClipboardText(task.result->dump(2).c_str());
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Close")) {
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                } else {
+                    ImGui::TextDisabled("-");
+                }
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+
+    // Bottom section - quick stats
+    ImGui::Separator();
+    ImGui::Text("Total: %zu | Running: %zu | Pending: %zu | Completed: %zu | Failed: %zu | Cancelled: %zu",
+        counts.total, counts.running, counts.pending, counts.completed, counts.failed, counts.cancelled);
 
     ImGui::End();
 }
