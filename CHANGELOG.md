@@ -7,28 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-02-01
+
 ### Added
-- Precompiled headers for faster incremental builds
-- Unity builds for faster clean builds (Release only)
-- Link-time optimization (LTO) for Release builds
-- Telemetry documentation in README
-- Telemetry settings toggle in Settings > General
-- Telemetry config persistence (enabled by default)
-- `.clang-format` for consistent code style
-- `CONTRIBUTING.md` with development guidelines
-- RequestValidator improvements (max size, usermode address checks)
 - SIMD-optimized pattern scanner (SSE2) - 8-16x faster for common patterns
-- Build status badge in README
 - DMA read cache with page-aligned LRU (50-80% fewer DMA reads when enabled)
 - MCP endpoints: `cache_stats`, `cache_config`, `cache_clear`
 - Cache toggle in Settings > General with live stats tooltip
+- Telemetry toggle in Settings > General with config persistence
 - Version number in window title
-- `limits.h` - Centralized constants for size limits
+- `limits.h` - centralized constants for size limits
+- RequestValidator improvements (max size, usermode address checks)
+- `.clang-format` for consistent code style
+- `CONTRIBUTING.md` with development guidelines
 
 ### Changed
-- Standardized member variable naming convention
-- Improved DMA error messages with actionable troubleshooting tips
-- Replaced std::cerr with LOG_* macros for consistent logging
+- Build system: precompiled headers, unity builds, LTO for Release
 
 ## [0.1.6] - 2026-02-01
 
@@ -105,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ImGui-based GUI
 - MCP server for AI integration
 
-[Unreleased]: https://github.com/super2xl/orpheus/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/super2xl/orpheus/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/super2xl/orpheus/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/super2xl/orpheus/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/super2xl/orpheus/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/super2xl/orpheus/compare/v0.1.3...v0.1.4
